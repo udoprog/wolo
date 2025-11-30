@@ -7,36 +7,26 @@
 
 Simple network monitor capable of sending magic Wake-on-LAN packets.
 
-Populate `/etc/ethers` (see `man ethers`) and/or `/etc/hosts` and run with:
+Populate `/etc/ethers` (`man ethers`) and/or `/etc/hosts` (`man hosts`) and
+run with:
 
 ```sh
 wolo --bind 0.0.0.0:3000 --home home.md
 ```
 
-The `home.md` file is expected to contain entries like these:
-
-```md
-# wolo
-
-This is the landing page for your wolo installation. Please edit it by copying
-it from the README.md and specify an alternative path using the --home option.
-
-* Network: /network
-* Github: https://github.com/udoprog/wolo
-```
-
-This will populate a landing page at whatever port wolo is listening to.
+The `home.md` is used to populate the landing page, see [Landing
+Page](#landing-page) below for how to configure this.
 
 ![home](home.png)
 
 The `/network` page show an overview of the state of hosts on the network
-and the ability to wake them up:
+and the ability to wake them up if they have configured mac addresses.
 
 ![showcase](showcase.png)
 
 <br>
 
-## More configuration
+## Configuration
 
 The wolo service can take configuration from multiple sources:
 
@@ -71,3 +61,26 @@ preferred_name = "example"
 # `--ignore-host` option.
 ignore = false
 ```
+
+<br>
+
+#### Landing Page
+
+We expect a landing page to be specified in markdown either through the
+`home` option or the `--home` cli option. This can be dynamically changed
+while the service is running.
+
+```md
+# wolo
+
+This is the landing page for your wolo installation. Please edit it by copying
+it from the README.md and specify an alternative path using the --home option.
+
+* [Network](/network)
+* [Github](https://github.com/udoprog/wolo)
+```
+
+Note that arbitrary markdown is not supported. Only the given structures are
+supported. The first title, paragraphs and links in list will simply be
+extracted and used to build the landing page. Warnings will be emitted for
+entries which are currently skipped.

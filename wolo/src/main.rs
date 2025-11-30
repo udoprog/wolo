@@ -1,35 +1,25 @@
 //! Simple network monitor capable of sending magic Wake-on-LAN packets.
 //!
-//! Populate `/etc/ethers` (see `man ethers`) and/or `/etc/hosts` and run with:
+//! Populate `/etc/ethers` (`man ethers`) and/or `/etc/hosts` (`man hosts`) and
+//! run with:
 //!
 //! ```sh
 //! wolo --bind 0.0.0.0:3000 --home home.md
 //! ```
 //!
-//! The `home.md` file is expected to contain entries like these:
-//!
-//! ```md
-//! # wolo
-//!
-//! This is the landing page for your wolo installation. Please edit it by copying
-//! it from the README.md and specify an alternative path using the --home option.
-//!
-//! * Network: /network
-//! * Github: https://github.com/udoprog/wolo
-//! ```
-//!
-//! This will populate a landing page at whatever port wolo is listening to.
+//! The `home.md` is used to populate the landing page, see [Landing
+//! Page](#landing-page) below for how to configure this.
 //!
 //! ![home](home.png)
 //!
 //! The `/network` page show an overview of the state of hosts on the network
-//! and the ability to wake them up:
+//! and the ability to wake them up if they have configured mac addresses.
 //!
 //! ![showcase](showcase.png)
 //!
 //! <br>
 //!
-//! ## More configuration
+//! ## Configuration
 //!
 //! The wolo service can take configuration from multiple sources:
 //!
@@ -64,15 +54,35 @@
 //! # `--ignore-host` option.
 //! ignore = false
 //! ```
+//!
+//! <br>
+//!
+//! #### Landing Page
+//!
+//! We expect a landing page to be specified in markdown either through the
+//! `home` option or the `--home` cli option. This can be dynamically changed
+//! while the service is running.
+//!
+//! ```md
+//! # wolo
+//!
+//! This is the landing page for your wolo installation. Please edit it by copying
+//! it from the README.md and specify an alternative path using the --home option.
+//!
+//! * [Network](/network)
+//! * [Github](https://github.com/udoprog/wolo)
+//! ```
+//!
+//! Note that arbitrary markdown is not supported. Only the given structures are
+//! supported. The first title, paragraphs and links in list will simply be
+//! extracted and used to build the landing page. Warnings will be emitted for
+//! entries which are currently skipped.
 
 #![allow(clippy::drain_collect)]
 
-use core::pin::pin;
-
 use std::env;
-use std::io::Cursor;
 use std::os::fd::FromRawFd;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -83,17 +93,14 @@ use axum::http::{StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
-use serde::Serialize;
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::net::TcpListener;
 use tokio::task;
 
-use crate::embed::Base64;
 use crate::utils::Templates;
 
 mod config;
 mod embed;
+mod home;
 mod host_name_cache;
 mod hosts;
 mod network;
@@ -107,7 +114,7 @@ const DEFAULT_BIND: &str = "0.0.0.0:3000";
 /// Path to load links from.
 #[derive(Clone)]
 pub struct S {
-    home: Option<Arc<Path>>,
+    home: home::Home,
     templates: Templates,
 }
 
@@ -222,6 +229,8 @@ async fn inner() -> Result<(), anyhow::Error> {
         hosts.add_hosts_path(path);
     }
 
+    let home = home::new(opts.home.as_deref());
+
     let hosts = hosts.build();
     let hosts_handle = tokio::spawn(hosts::spawn(hosts.clone(), config.clone()));
 
@@ -229,18 +238,25 @@ async fn inner() -> Result<(), anyhow::Error> {
     let pinger_handle = task::spawn(ping_loop::new(ping_state.clone(), hosts.clone()));
 
     let state = S {
-        home: opts.home.map(Arc::from),
+        home: home.clone(),
         templates: templates.clone(),
     };
+
+    let network = network::router(
+        ping_state,
+        "/network",
+        templates,
+        hosts.clone(),
+        showcase,
+        home,
+    )
+    .await;
 
     // build our application with a route
     let app = Router::new()
         .route("/", get(root))
         .with_state(state)
-        .nest(
-            "/network",
-            network::router(ping_state, "/network", templates, hosts.clone(), showcase),
-        )
+        .nest("/network", network)
         .fallback(get(static_handler));
 
     let bind = opts
@@ -333,87 +349,10 @@ impl IntoResponse for Error {
 // basic handler that responds with a static string
 async fn root(
     State(S {
-        home: path,
-        templates,
-        ..
+        home, templates, ..
     }): State<S>,
 ) -> Result<Html<String>, Error> {
-    #[derive(Serialize)]
-    struct Link {
-        title: String,
-        href: String,
-    }
-
-    fn parse_link(line: &str) -> Option<Link> {
-        let (title, href) = line.split_once(':')?;
-
-        Some(Link {
-            title: title.trim().to_owned(),
-            href: href.trim().to_owned(),
-        })
-    }
-
-    #[derive(Serialize)]
-    struct HomePage {
-        hash: Base64,
-        title: String,
-        text: String,
-        links: Vec<Link>,
-    }
-
-    impl HomePage {
-        fn new() -> Self {
-            Self {
-                hash: embed::hash(),
-                title: String::new(),
-                text: String::new(),
-                links: Vec::new(),
-            }
-        }
-
-        async fn populate(&mut self, reader: impl AsyncRead) -> Result<(), Error> {
-            let reader = pin!(BufReader::new(reader));
-            let mut lines = reader.lines();
-
-            while let Some(line) = lines.next_line().await? {
-                if let Some(title) = line.trim_start().strip_prefix('#') {
-                    self.title = title.trim().to_owned();
-                    continue;
-                }
-
-                if let Some(line) = line.trim_start().strip_prefix('*') {
-                    let Some(link) = parse_link(line) else {
-                        continue;
-                    };
-
-                    self.links.push(link);
-                    continue;
-                }
-
-                let line = line.trim();
-
-                if !line.is_empty() {
-                    self.text.push_str(line);
-                    self.text.push('\n');
-                }
-            }
-
-            Ok(())
-        }
-    }
-
-    let mut home = HomePage::new();
-
-    if let Some(path) = path.as_deref()
-        && let Ok(file) = File::open(path).await
-    {
-        home.populate(file).await?;
-    } else if let Some(asset) = embed::Assets::get("home.md") {
-        home.populate(Cursor::new(asset.data.as_ref())).await?;
-    } else {
-        home.title = "No Title".to_owned();
-    }
-
+    let home = home.build().await;
     let o = templates.render("home.html", &home)?;
     Ok(Html(o))
 }

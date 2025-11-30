@@ -2,6 +2,7 @@ use core::fmt;
 use core::net::IpAddr;
 use core::time::Duration;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
@@ -13,13 +14,13 @@ use axum_extra::extract::Form;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::Error;
 use crate::embed::Base64;
 use crate::hosts;
 use crate::ping_loop;
 use crate::showcase;
 use crate::utils::Templates;
 use crate::wake_on_lan::MagicPacket;
+use crate::{Error, home};
 
 #[derive(Clone)]
 struct S {
@@ -28,16 +29,20 @@ struct S {
     templates: Templates,
     hosts: hosts::State,
     showcase: showcase::Helper,
+    home: Arc<home::HomePage>,
 }
 
-pub(super) fn router(
+pub(super) async fn router(
     ping_state: ping_loop::State,
     prefix: &'static str,
     templates: Templates,
     hosts: hosts::State,
     showcase: showcase::Helper,
+    home: home::Home,
 ) -> Router {
-    Router::new()
+    let home = Arc::new(home.build().await);
+
+    let router = Router::new()
         .route("/", get(entry))
         .route("/wake", post(wake))
         .with_state(S {
@@ -46,7 +51,10 @@ pub(super) fn router(
             templates,
             hosts,
             showcase,
-        })
+            home,
+        });
+
+    router
 }
 
 #[derive(Deserialize)]
@@ -65,6 +73,7 @@ async fn entry(
         templates,
         hosts,
         showcase,
+        home,
         ..
     }): State<S>,
     Query(query): Query<Network>,
@@ -109,6 +118,7 @@ async fn entry(
     #[derive(Serialize)]
     struct Context {
         hash: Base64,
+        title: String,
         prefix: &'static str,
         hosts: Vec<Host>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,6 +132,7 @@ async fn entry(
 
     let mut context = Context {
         hash: crate::embed::hash(),
+        title: home.title.clone().into_owned(),
         prefix,
         hosts: Vec::new(),
         error: match query.error.as_deref() {
