@@ -1,10 +1,10 @@
 [package]
 name = "wolo"
 edition = "2024"
-publish = false
 rust-version = "1.91"
-license = "MIT OR Apache-2.0"
 description = "A lightweight rust service to do basic network monitoring."
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 lib = { path = "../lib" }

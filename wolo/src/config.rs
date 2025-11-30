@@ -1,7 +1,7 @@
 use core::cell::RefCell;
-use core::fmt;
 use core::fmt::Write;
 use core::str::FromStr;
+use core::{fmt, iter};
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -10,6 +10,40 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use macaddr::MacAddr6;
 use toml::Value;
+
+trait TakeFlexible
+where
+    Self: Sized,
+{
+    fn take_table(key: &str, value: Parser<'_>) -> Option<Self>;
+
+    fn take_value(hosts: Parser<'_>) -> Option<Self>;
+}
+
+impl TakeFlexible for HostConfig {
+    fn take_table(key: &str, mut parser: Parser<'_>) -> Option<Self> {
+        let out = HostConfig {
+            macs: parser.take_iter("macs"),
+            names: BTreeSet::from([key.to_owned()]),
+            preferred_name: parser.take("preferred_name"),
+            ignore: parser.take_boolean("ignore").unwrap_or(false),
+        };
+
+        parser.check();
+        Some(out)
+    }
+
+    fn take_value(hosts: Parser<'_>) -> Option<Self> {
+        let host = hosts.parse()?;
+
+        Some(HostConfig {
+            macs: BTreeSet::new(),
+            names: BTreeSet::from([host]),
+            preferred_name: None,
+            ignore: false,
+        })
+    }
+}
 
 /// Loaded configuration file.
 #[derive(Default)]
@@ -21,6 +55,7 @@ pub struct Config {
 }
 
 /// Loaded host configuration.
+#[derive(Debug)]
 pub struct HostConfig {
     /// Loaded host configurations.
     pub macs: BTreeSet<MacAddr6>,
@@ -28,6 +63,8 @@ pub struct HostConfig {
     pub names: BTreeSet<String>,
     /// Preferred host name.
     pub preferred_name: Option<String>,
+    /// Whether to ignore this host.
+    pub ignore: bool,
 }
 
 impl Config {
@@ -56,6 +93,7 @@ impl Config {
         }
 
         host.preferred_name = new.preferred_name.or(host.preferred_name.take());
+        host.ignore |= new.ignore;
     }
 
     /// Add to configuration from the given path.
@@ -67,57 +105,38 @@ impl Config {
         let value: Value = toml::from_slice(&bytes).context("failed to parse config file")?;
         let mut parser = Parser::new(value, diag);
 
-        if let Some(bind) = parser.take("bind", Parser::parse).flatten() {
+        if let Some(bind) = parser.take("bind") {
             self.bind = Some(bind);
         }
 
-        parser.take("hosts", |hosts| match hosts.value {
-            Value::Table(table) => {
-                for (key, value) in table {
-                    hosts.diag.key(&key);
-                    let mut parser = Parser::new(value, hosts.diag);
-
-                    self.add_host(HostConfig {
-                        macs: parser
-                            .take("macs", |p| p.iter(Parser::parse))
-                            .unwrap_or_default(),
-                        names: BTreeSet::from([key.to_owned()]),
-                        preferred_name: parser.take("preferred_name", Parser::parse).flatten(),
-                    });
-
-                    parser.check();
-                }
-            }
-            Value::Array(values) => {
-                for (index, value) in values.into_iter().enumerate() {
-                    hosts.diag.index(index);
-
-                    if let Some(host) = Parser::new(value, hosts.diag).parse() {
-                        self.add_host(HostConfig {
-                            macs: BTreeSet::new(),
-                            names: BTreeSet::from([host]),
-                            preferred_name: None,
-                        });
-                    }
-                }
-            }
-            Value::String(name) => {
-                self.add_host(HostConfig {
-                    macs: BTreeSet::new(),
-                    names: BTreeSet::from([name.to_owned()]),
-                    preferred_name: None,
-                });
-            }
-            other => {
-                hosts.diag.error(format_args!(
-                    "expected table or string, found {}",
-                    other.type_str()
-                ));
-            }
-        });
+        for host in parser.take_flexible::<HostConfig, Vec<_>>("hosts") {
+            self.add_host(host);
+        }
 
         parser.check();
         Ok(())
+    }
+
+    /// Specify that a given host should be ignored.
+    pub fn ignore_host(&mut self, name: &str) {
+        let host = 'found: {
+            for host in &mut self.hosts {
+                if host.names.contains(name) {
+                    break 'found host;
+                }
+            }
+
+            self.hosts.push(HostConfig {
+                macs: BTreeSet::new(),
+                names: BTreeSet::from([name.to_owned()]),
+                preferred_name: None,
+                ignore: true,
+            });
+
+            return;
+        };
+
+        host.ignore = true;
     }
 }
 
@@ -155,41 +174,155 @@ impl<'a> Parser<'a> {
         out
     }
 
-    fn take<O>(&mut self, key: &str, parser: impl FnOnce(Parser<'a>) -> O) -> Option<O> {
-        let value = match &mut self.value {
-            Value::Table(table) => table.remove(key)?,
-            _ => return None,
+    fn take_any<T>(&mut self, key: &str, parser: impl FnOnce(Value) -> T) -> T
+    where
+        T: Default,
+    {
+        let Value::Table(table) = &mut self.value else {
+            return T::default();
+        };
+
+        let Some(value) = table.remove(key) else {
+            return T::default();
         };
 
         self.diag.key(key);
-        let output = parser(Parser::new(value, self.diag));
-        Some(output)
+        let value = parser(value);
+        self.diag.pop();
+        value
     }
 
-    fn iter<U, O>(self, mut iter: impl FnMut(Parser<'a>) -> Option<O>) -> U
+    fn take_iter<T, U>(&mut self, key: &str) -> U
     where
-        U: FromIterator<O>,
+        T: FromStr<Err: fmt::Display>,
+        U: FromIterator<T> + Default,
     {
-        let mut out = Vec::new();
+        self.take_any(key, |value| match value {
+            Value::String(value) => match value.parse::<T>() {
+                Ok(value) => U::from_iter([value]),
+                Err(error) => {
+                    self.diag.error(format_args!("{error}"));
+                    U::default()
+                }
+            },
+            Value::Array(values) => {
+                let mut iter = values.into_iter().enumerate();
 
-        match self.value {
-            Value::Array(array) => {
-                for (index, value) in array.into_iter().enumerate() {
+                let it = iter::from_fn(|| {
+                    let (index, value) = iter.next()?;
                     self.diag.index(index);
 
-                    if let Some(o) = iter(Parser::new(value, self.diag)) {
-                        out.push(o);
-                    }
-                }
+                    let value = match value {
+                        Value::String(value) => match value.parse::<T>() {
+                            Ok(value) => Some(value),
+                            Err(error) => {
+                                self.diag.error(format_args!("{error}"));
+                                None
+                            }
+                        },
+                        other => {
+                            self.diag
+                                .error(format_args!("expected string, found {}", other.type_str()));
+                            None
+                        }
+                    };
+
+                    self.diag.pop();
+                    value
+                });
+
+                U::from_iter(it)
             }
             other => {
                 self.diag
-                    .error(format_args!("expected array, found {}", other.type_str()));
+                    .error(format_args!("expected string, found {}", other.type_str()));
+                U::default()
             }
-        }
+        })
+    }
 
-        self.diag.pop();
-        U::from_iter(out)
+    fn take<T>(&mut self, key: &str) -> Option<T>
+    where
+        T: FromStr<Err: fmt::Display>,
+    {
+        self.take_any(key, |value| match value {
+            Value::String(value) => match value.parse::<T>() {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    self.diag.error(format_args!("{error}"));
+                    None
+                }
+            },
+            other => {
+                self.diag
+                    .error(format_args!("expected string, found {}", other.type_str()));
+                None
+            }
+        })
+    }
+
+    fn take_boolean(&mut self, key: &str) -> Option<bool> {
+        self.take_any(key, |value| match value {
+            Value::Boolean(value) => Some(value),
+            other => {
+                self.diag
+                    .error(format_args!("expected boolean, found {}", other.type_str()));
+                None
+            }
+        })
+    }
+
+    fn take_flexible<T, U>(&mut self, key: &str) -> U
+    where
+        T: TakeFlexible,
+        U: FromIterator<T> + Default,
+    {
+        self.take_any(key, |value| match value {
+            Value::Table(table) => {
+                let mut it = table.into_iter();
+
+                let it = iter::from_fn(|| {
+                    loop {
+                        let (key, value) = it.next()?;
+                        self.diag.key(&key);
+
+                        let Some(value) = T::take_table(&key, Parser::new(value, self.diag)) else {
+                            continue;
+                        };
+
+                        return Some(value);
+                    }
+                });
+
+                U::from_iter(it)
+            }
+            Value::Array(values) => {
+                let mut it = values.into_iter().enumerate();
+
+                let it = iter::from_fn(|| {
+                    loop {
+                        let (index, value) = it.next()?;
+                        self.diag.index(index);
+
+                        let Some(value) = T::take_value(Parser::new(value, self.diag)) else {
+                            continue;
+                        };
+
+                        return Some(value);
+                    }
+                });
+
+                U::from_iter(it)
+            }
+            value => {
+                self.diag.error(format_args!(
+                    "expected table or array, found {}",
+                    value.type_str()
+                ));
+
+                U::default()
+            }
+        })
     }
 
     fn check(self) {

@@ -1,5 +1,6 @@
 use core::time::Duration;
 use std::collections::{BTreeSet, HashMap, btree_set};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,18 +17,25 @@ use crate::config::Config;
 /// Builder for the host monitoring state.
 pub struct Builder {
     ether_paths: Vec<PathBuf>,
+    host_paths: Vec<PathBuf>,
 }
 
 impl Builder {
-    /// Add a path to an ethers file to monitor.
+    /// Add an /etc/ethers file to monitor.
     pub fn add_ethers_path(&mut self, path: &Path) {
         self.ether_paths.push(path.to_owned());
+    }
+
+    /// Add an /etc/hosts file to monitor.
+    pub fn add_hosts_path(&mut self, path: &Path) {
+        self.host_paths.push(path.to_owned());
     }
 
     /// Build the host monitoring state.
     pub fn build(self) -> State {
         let inner = Inner {
             ether_paths: self.ether_paths,
+            host_paths: self.host_paths,
             hosts: RwLock::new(Vec::new()),
         };
 
@@ -39,6 +47,7 @@ impl Builder {
 
 struct Inner {
     ether_paths: Vec<PathBuf>,
+    host_paths: Vec<PathBuf>,
     hosts: RwLock<Vec<Host>>,
 }
 
@@ -49,6 +58,7 @@ pub struct Host {
     pub names: BTreeSet<String>,
     pub macs: BTreeSet<MacAddr6>,
     pub preferred_name: Option<String>,
+    pub ignore: bool,
 }
 
 impl Host {
@@ -108,6 +118,7 @@ impl State {
     pub fn builder() -> Builder {
         Builder {
             ether_paths: Vec::new(),
+            host_paths: Vec::new(),
         }
     }
 }
@@ -154,6 +165,52 @@ impl Reader {
 
         ethers
     }
+
+    /// Read a hosts file from the given path.
+    async fn read_hosts(&mut self, path: &Path) -> Vec<String> {
+        let Ok(f) = File::open(path).await else {
+            return Vec::new();
+        };
+
+        let mut reader = BufReader::new(f);
+        let mut hosts = Vec::new();
+
+        loop {
+            self.line.clear();
+
+            let Ok(n) = reader.read_line(&mut self.line).await else {
+                break;
+            };
+
+            if n == 0 {
+                break;
+            }
+
+            let line = self.line.trim();
+
+            if line.starts_with('#') {
+                continue;
+            }
+
+            let Some((ip, names)) = line.split_once(' ') else {
+                continue;
+            };
+
+            let Ok(ip) = ip.parse::<IpAddr>() else {
+                continue;
+            };
+
+            if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+                continue;
+            }
+
+            for name in names.split_ascii_whitespace() {
+                hosts.push(name.to_owned());
+            }
+        }
+
+        hosts
+    }
 }
 
 struct Service {
@@ -163,13 +220,14 @@ struct Service {
 }
 
 impl Service {
-    fn from_config(&mut self, hosts: &mut Vec<Host>, config: &Config) {
+    fn add_from_config(&mut self, hosts: &mut Vec<Host>, config: &Config) {
         for h in &config.hosts {
             self.add(
                 hosts,
                 h.macs.iter().copied(),
                 &h.names,
                 h.preferred_name.as_deref(),
+                h.ignore,
             );
         }
     }
@@ -180,6 +238,7 @@ impl Service {
         macs: impl IntoIterator<Item = MacAddr6> + Clone,
         names: impl IntoIterator<Item: AsRef<str>> + Clone,
         preferred_name: Option<&str>,
+        ignore: bool,
     ) {
         let mut indexes = BTreeSet::new();
 
@@ -204,6 +263,7 @@ impl Service {
                 macs: macs.clone().into_iter().collect(),
                 preferred_name: preferred_name.map(|n| n.to_owned()),
                 id: Uuid::nil(),
+                ignore,
             });
 
             indexes.insert(index);
@@ -216,6 +276,7 @@ impl Service {
                 host.preferred_name = preferred_name
                     .map(|n| n.to_owned())
                     .or(host.preferred_name.take());
+                host.ignore = ignore || host.ignore;
             }
         }
 
@@ -253,11 +314,21 @@ pub async fn spawn(state: State, config: Arc<Config>) {
             let ethers = service.reader.read_ethers(path).await;
 
             for (mac, name) in ethers {
-                service.add(&mut hosts, [mac], [name.as_str()], None);
+                service.add(&mut hosts, [mac], [name.as_str()], None, false);
             }
         }
 
-        service.from_config(&mut hosts, &config);
+        for path in &state.inner.host_paths {
+            let found = service.reader.read_hosts(path).await;
+
+            for name in found {
+                service.add(&mut hosts, [], [name.as_str()], None, false);
+            }
+        }
+
+        service.add_from_config(&mut hosts, &config);
+
+        hosts.retain(|h| !h.ignore);
 
         for host in &mut hosts {
             host.build_id();

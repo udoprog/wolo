@@ -9,7 +9,7 @@
 //! The `home.md` file is expected to contain entries like these:
 //!
 //! ```md
-//! # Default Title
+//! # wolo
 //!
 //! This is the landing page for your wolo installation. Please edit it by copying
 //! it from the README.md and specify an alternative path using the --home option.
@@ -26,6 +26,44 @@
 //! and the ability to wake them up:
 //!
 //! ![showcase](showcase.png)
+//!
+//! <br>
+//!
+//! ## Configuration
+//!
+//! The wolo service can take configuration from multiple sources:
+//!
+//! * By default we parse `/etc/hosts` to find hosts to interact with.
+//!   Additional hosts files can be specified using `--hosts <path>`.
+//! * By default we parse `/etc/ethers` to find and associate hosts with MAC
+//!   addresses. Additional files of this format can be specified using
+//!   `--ethers <path>`.
+//! * Any number of optional configuration files can be specified using
+//!   `--config <path>`.
+//!
+//! The configuration files are in toml, and have the following format:
+//!
+//! ```toml
+//! # The default socket address to bind to.
+//! # Can be IPv4 or IPv6.
+//! bind = "0.0.0.0:3000"
+//!
+//! # Simple variant of a list of hosts.
+//! hosts = ["example.com", "another.example.com"]
+//!
+//! # Detailed host configuration.
+//! [hosts."example.com"]
+//! # Collection of mac addresses associated with this host.
+//! macs = ["00:11:22:33:44:55"]
+//! # Setting the preferred name will make it so that only this name is
+//! # displayed in the network view for this host.
+//! preferred_name = "example"
+//! # Whether this host should be ignored.
+//! #
+//! # Additional hosts to be ignored can be specified with the
+//! # `--ignore-host` option.
+//! ignore = false
+//! ```
 //!
 //! <br>
 //!
@@ -105,15 +143,27 @@ struct Opts {
     /// Address and port to bind the server to. Defaults to `0.0.0.0:3000`.
     #[clap(long)]
     bind: Option<String>,
+    /// Path to load landing page configuration from.
+    #[clap(long)]
+    home: Option<PathBuf>,
     /// Path to load an ethers file from. By default this is `/etc/ethers`.
     ///
     /// The files specified in here will be monitored for changes and reloaded
     /// if needed.
     #[clap(long, default_value = "/etc/ethers")]
     ethers: Vec<PathBuf>,
-    /// Path to load links from.
+    /// Path to load hosts files from. By default this is `/etc/hosts`.
+    ///
+    /// The files specified in here will be monitored for changes and reloaded
+    /// if needed.
+    #[clap(long, default_value = "/etc/hosts")]
+    hosts: Vec<PathBuf>,
+    /// Specify hosts to ignore.
+    ///
+    /// This will ensure that the host is ignored even if it's part of
+    /// configuration.
     #[clap(long)]
-    home: Option<PathBuf>,
+    ignore_host: Vec<String>,
     /// Replaces real hostnames, macs, and ips with fake ones for demonstration.
     #[clap(long)]
     showcase: bool,
@@ -158,6 +208,10 @@ async fn inner() -> Result<(), anyhow::Error> {
         }
     }
 
+    for host in &opts.ignore_host {
+        config.ignore_host(host);
+    }
+
     if has_errors {
         return Err(anyhow!("Configuration had errors"));
     }
@@ -170,6 +224,10 @@ async fn inner() -> Result<(), anyhow::Error> {
 
     for path in &opts.ethers {
         hosts.add_ethers_path(path);
+    }
+
+    for path in &opts.hosts {
+        hosts.add_hosts_path(path);
     }
 
     let hosts = hosts.build();

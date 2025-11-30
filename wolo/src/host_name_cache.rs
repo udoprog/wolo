@@ -72,9 +72,9 @@ impl HostNameCache {
         }
     }
 
-    /// Evict errors older than 30 seconds and name entries older than 2 minutes.
+    /// Evict old entries.
     pub async fn evict_old(&mut self) {
-        const DURATION: Duration = Duration::from_secs(120);
+        const DURATION: Duration = Duration::from_secs(15);
 
         let now = Instant::now();
 
