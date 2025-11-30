@@ -5,6 +5,7 @@ use core::time::Duration;
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::{OriginalUri, Query, State};
 use axum::http::uri::Builder;
@@ -19,17 +20,17 @@ use crate::hosts;
 use crate::ping_loop;
 use crate::showcase;
 use crate::utils::Templates;
-use crate::wake_on_lan::MagicPacket;
+use crate::wake_on_lan::{BroadcastSocket, MagicPacket};
 use crate::{Error, home};
 
-#[derive(Clone)]
 struct S {
-    ping_state: ping_loop::State,
     prefix: &'static str,
+    ping_state: ping_loop::State,
     templates: Templates,
     hosts: hosts::State,
     showcase: showcase::Helper,
-    home: Arc<home::HomePage>,
+    home: home::HomePage,
+    socket: BroadcastSocket,
 }
 
 pub(super) async fn router(
@@ -39,20 +40,26 @@ pub(super) async fn router(
     hosts: hosts::State,
     showcase: showcase::Helper,
     home: home::Home,
-) -> Router {
-    let home = Arc::new(home.build().await);
+) -> Result<Router> {
+    let home = home.build().await;
+    let socket = BroadcastSocket::bind()
+        .await
+        .context("binding broadcast socket")?;
 
-    Router::new()
+    let router = Router::new()
         .route("/", get(entry))
         .route("/wake", post(wake))
-        .with_state(S {
+        .with_state(Arc::new(S {
             ping_state,
             prefix,
             templates,
             hosts,
             showcase,
             home,
-        })
+            socket,
+        }));
+
+    Ok(router)
 }
 
 #[derive(Deserialize)]
@@ -65,17 +72,19 @@ struct Network {
 
 // basic handler that responds with a static string
 async fn entry(
-    State(S {
-        prefix,
-        ping_state,
-        templates,
-        hosts,
-        showcase,
-        home,
-        ..
-    }): State<S>,
+    State(state): State<Arc<S>>,
     Query(query): Query<Network>,
 ) -> Result<Html<String>, Error> {
+    let S {
+        prefix,
+        ref templates,
+        ref hosts,
+        ref ping_state,
+        ref showcase,
+        ref home,
+        ..
+    } = *state;
+
     #[derive(Serialize)]
     struct PingError {
         error: String,
@@ -268,10 +277,17 @@ struct Wake {
 }
 
 async fn wake(
-    State(S { prefix, hosts, .. }): State<S>,
+    State(state): State<Arc<S>>,
     OriginalUri(uri): OriginalUri,
     Form(wake): Form<Wake>,
 ) -> Result<Redirect, Error> {
+    let S {
+        prefix,
+        ref hosts,
+        ref socket,
+        ..
+    } = *state;
+
     let hosts = hosts.hosts().await;
 
     let Some(host) = hosts.iter().find(|h| h.id == wake.host) else {
@@ -284,8 +300,8 @@ async fn wake(
     let uri = builder.build()?;
 
     for mac in &host.macs {
-        let packet = MagicPacket::new(mac.into_array());
-        packet.send().await?;
+        let packet = MagicPacket::new(*mac);
+        socket.send(&packet).await?;
     }
 
     let redirect = format!("{uri}#host-{}", host.id);

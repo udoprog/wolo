@@ -1,5 +1,0 @@
-bind = "0.0.0.0:3000"
-
-[hosts."moore"]
-preferred_name = "moore.lan"
-ignore = true

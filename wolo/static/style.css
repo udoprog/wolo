@@ -5,13 +5,9 @@ html {
     background-color: #f9f9f9;
 }
 
-button {
-    font-size: inherit;
-}
-
 a {
     text-decoration: none;
-    color: #1a0dab;
+    color: #184291;
 }
 
 h1, h4 {
@@ -34,10 +30,9 @@ h4 {
     font-family: "Courier New", Courier, monospace;
 }
 
-button.primary {
+button {
+    font-size: inherit;
     display: block;
-    color: white;
-    background-color: #4CAF50;
     width: 100%;
     padding: 0.2em;
     border: none;
@@ -45,7 +40,12 @@ button.primary {
     cursor: pointer;
 }
 
-button:hover {
+button.primary {
+    color: white;
+    background-color: #4CAF50;
+}
+
+button.primary:hover {
     background-color: #45a049;
 }
 
@@ -150,7 +150,7 @@ button:hover {
         font-size: inherit;
     }
 
-    button.primary {
+    button {
         max-width: 120px;
     }
 

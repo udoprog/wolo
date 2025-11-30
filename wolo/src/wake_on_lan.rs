@@ -1,60 +1,67 @@
+use core::mem::size_of;
+
+use core::net::SocketAddrV4;
 use std::io;
 use std::net::Ipv4Addr;
 
-use tokio::net::{ToSocketAddrs, UdpSocket};
+use macaddr::MacAddr6;
+use tokio::net::UdpSocket;
 
-const BROADCAST_TO_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::new(255, 255, 255, 255), 9);
-const BROADCAST_FROM_ADDR: (Ipv4Addr, u16) = (Ipv4Addr::new(0, 0, 0, 0), 0);
+const FROM: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
+const TO: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::BROADCAST, 9);
 const MAGIC_BYTES_HEADER: [u8; 6] = [0xFF; 6];
+
+/// Configure a broadcast socket used for sending Wake-on-LAN magic packets.
+pub struct BroadcastSocket {
+    socket: UdpSocket,
+}
+
+impl BroadcastSocket {
+    /// Creates a new UDP socket bound to `from` that can send broadcast
+    /// messages.
+    pub async fn bind() -> io::Result<Self> {
+        let socket = UdpSocket::bind(FROM).await?;
+        socket.set_broadcast(true)?;
+        Ok(Self { socket })
+    }
+
+    /// Sends the given magic packet via this socket to the broadcast address.
+    pub async fn send(&self, packet: &MagicPacket) -> io::Result<()> {
+        self.socket.send_to(packet.as_bytes(), TO).await?;
+        Ok(())
+    }
+}
 
 #[repr(C)]
 pub struct MagicPacket {
+    // 6 bytes of 0xFF.
     header: [u8; 6],
+    // 16 repetitions of the target MAC address.
     dest: [[u8; 6]; 16],
 }
 
 const _: () = const {
-    assert!(core::mem::size_of::<MagicPacket>() == 102);
+    assert!(size_of::<MagicPacket>() == 102);
 };
 
 impl MagicPacket {
     /// Creates a new `MagicPacket` intended for `mac_address` (but doesn't send it yet).
-    pub fn new(mac_address: [u8; 6]) -> MagicPacket {
-        let mut magic_bytes = MagicPacket {
-            header: MAGIC_BYTES_HEADER,
-            dest: [[0u8; 6]; 16],
-        };
+    pub fn new(address: MacAddr6) -> Self {
+        let mut dest = [[0u8; 6]; 16];
 
-        for d in magic_bytes.dest.iter_mut() {
-            *d = mac_address;
+        for d in dest.iter_mut() {
+            *d = address.into_array();
         }
 
-        magic_bytes
+        Self {
+            header: MAGIC_BYTES_HEADER,
+            dest,
+        }
     }
 
-    fn as_bytes(&self) -> &[u8; 102] {
+    fn as_bytes(&self) -> &[u8] {
         // SAFETY: `MagicPacket` is `repr(C)` and consists entirely of `u8`
         // arrays.
-        unsafe { &*(self as *const MagicPacket as *const [u8; 102]) }
-    }
-
-    /// Sends the magic packet via UDP to the broadcast address
-    /// `255.255.255.255:9`. Lets the operating system choose the source port
-    /// and network interface.
-    pub async fn send(&self) -> io::Result<()> {
-        self.send_to(BROADCAST_TO_ADDR, BROADCAST_FROM_ADDR).await
-    }
-
-    /// Sends the magic packet via UDP to/from an IP address and port number of
-    /// your choosing.
-    pub async fn send_to(
-        &self,
-        to_addr: impl ToSocketAddrs,
-        from_addr: impl ToSocketAddrs,
-    ) -> io::Result<()> {
-        let socket = UdpSocket::bind(from_addr).await?;
-        socket.set_broadcast(true)?;
-        socket.send_to(self.as_bytes(), to_addr).await?;
-        Ok(())
+        unsafe { &*(self as *const Self as *const [u8; size_of::<Self>()]) }
     }
 }

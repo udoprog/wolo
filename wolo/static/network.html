@@ -8,20 +8,24 @@
 {% block content %}
 <h1>{{ title }} - network</h1>
 
-{% if error %}
+{%- if error %}
 <div class="row error">{{ error }}</div>
-{% endif %}
+{%- endif %}
 
 {% for host in hosts %}
 <h4 class="row" id="host-{{ host.id }}"><a href="#host-{{ host.id }}">💻 {{ host.names | join(", ") }}</a></h4>
 
-{% if host.just_woke %}
+{%- if host.just_woke %}
 <div class="row just-woke autohide">Magic Packet Sent</div>
-{% endif %}
+{%- endif %}
 
+{%- if host.mac | length > 0 %}
 <form class="row" action="{{prefix}}/wake" method="post">
 <button class="primary" type="submit" name="host" value="{{ host.id }}" title="Wake using magic packet">Wake</button>
 </form>
+{%- else %}
+<button class="disabled" title="Cannot wake without a MAC address" disabled>Wake</button>
+{%- endif %}
 
 {%- for mac in host.mac %}
 <div class="row records">

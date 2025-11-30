@@ -86,7 +86,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use axum::extract::State;
 use axum::http::{StatusCode, Uri, header};
@@ -185,7 +185,7 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn inner() -> Result<(), anyhow::Error> {
+async fn inner() -> Result<()> {
     let templates = crate::utils::load_templates().context("templates")?;
 
     let opts = Opts::try_parse()?;
@@ -250,7 +250,7 @@ async fn inner() -> Result<(), anyhow::Error> {
         showcase,
         home,
     )
-    .await;
+    .await?;
 
     // build our application with a route
     let app = Router::new()
@@ -299,12 +299,12 @@ async fn inner() -> Result<(), anyhow::Error> {
 }
 
 #[cfg(not(unix))]
-fn try_listen_fds() -> Result<Option<TcpListener>, anyhow::Error> {
+fn try_listen_fds() -> Result<Option<TcpListener>> {
     Ok(None)
 }
 
 #[cfg(unix)]
-fn try_listener_from_env(env: &'static str) -> Result<Option<TcpListener>, anyhow::Error> {
+fn try_listener_from_env(env: &'static str) -> Result<Option<TcpListener>> {
     let Ok(listen_fds) = env::var(env) else {
         return Ok(None);
     };
