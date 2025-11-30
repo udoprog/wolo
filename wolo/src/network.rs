@@ -196,12 +196,11 @@ async fn entry(
             id: host.id,
             just_woke,
             names: host
-                .names
-                .iter()
+                .names()
                 .map(|n| showcase.host_name(host.id, n))
                 .collect(),
             mac: host
-                .mac
+                .macs
                 .iter()
                 .map(|m| showcase.mac(*m).to_string())
                 .collect(),
@@ -275,7 +274,7 @@ async fn wake(
     let builder = Builder::from(uri).path_and_query(format!("{prefix}?woke={}", host.id));
     let uri = builder.build()?;
 
-    for mac in &host.mac {
+    for mac in &host.macs {
         let packet = MagicPacket::new(mac.into_array());
         packet.send().await?;
     }

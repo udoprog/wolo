@@ -1,5 +1,5 @@
 use core::time::Duration;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, btree_set};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,6 +10,8 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 use tokio::time;
 use twox_hash::xxhash3_128;
 use uuid::Uuid;
+
+use crate::config::Config;
 
 /// Builder for the host monitoring state.
 pub struct Builder {
@@ -44,11 +46,23 @@ struct Inner {
 #[derive(Debug, PartialEq)]
 pub struct Host {
     pub id: Uuid,
-    pub names: Vec<String>,
-    pub mac: Vec<MacAddr6>,
+    pub names: BTreeSet<String>,
+    pub macs: BTreeSet<MacAddr6>,
+    pub preferred_name: Option<String>,
 }
 
 impl Host {
+    /// Get an iterator over the host names.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        let (head, tail) = if let Some(preferred) = &self.preferred_name {
+            (Some(preferred.as_str()), btree_set::Iter::default())
+        } else {
+            (None, self.names.iter())
+        };
+
+        head.into_iter().chain(tail.map(|n| n.as_str()))
+    }
+
     pub fn build_id(&mut self) {
         const NAME: u8 = 0x01;
         const MAC: u8 = 0x02;
@@ -63,10 +77,10 @@ impl Host {
             hasher.write(name.as_bytes());
         }
 
-        let bytes = (self.mac.len() as u64).to_be_bytes();
+        let bytes = (self.macs.len() as u64).to_be_bytes();
         hasher.write(&bytes);
 
-        for mac in &self.mac {
+        for mac in &self.macs {
             hasher.write(&[MAC]);
             hasher.write(mac.as_bytes());
         }
@@ -143,81 +157,109 @@ impl Reader {
 }
 
 struct Service {
-    state: State,
     by_mac: HashMap<MacAddr6, usize>,
     by_name: HashMap<String, usize>,
     reader: Reader,
 }
 
 impl Service {
-    async fn build_hosts(&mut self, hosts: &mut Vec<Host>) {
-        self.by_mac.clear();
-        self.by_name.clear();
+    fn from_config(&mut self, hosts: &mut Vec<Host>, config: &Config) {
+        for h in &config.hosts {
+            self.add(
+                hosts,
+                h.macs.iter().copied(),
+                &h.names,
+                h.preferred_name.as_deref(),
+            );
+        }
+    }
 
-        hosts.clear();
+    fn add(
+        &mut self,
+        hosts: &mut Vec<Host>,
+        macs: impl IntoIterator<Item = MacAddr6> + Clone,
+        names: impl IntoIterator<Item: AsRef<str>> + Clone,
+        preferred_name: Option<&str>,
+    ) {
+        let mut indexes = BTreeSet::new();
 
-        for ether in &self.state.inner.ether_paths {
-            let ethers = self.reader.read_ethers(ether).await;
+        // Try to find existing indexes first.
+        for mac in macs.clone() {
+            indexes.extend(self.by_mac.get(&mac).copied());
+        }
 
-            for (mac, name) in ethers {
-                let index = self
-                    .by_mac
-                    .get(&mac)
-                    .copied()
-                    .or_else(|| self.by_name.get(&name).copied());
+        for name in names.clone() {
+            indexes.extend(self.by_name.get(name.as_ref()).copied());
+        }
 
-                let index = match index {
-                    Some(i) => i,
-                    None => {
-                        let index = hosts.len();
+        if indexes.is_empty() {
+            let index = hosts.len();
 
-                        hosts.push(Host {
-                            names: Vec::new(),
-                            mac: Vec::new(),
-                            id: Uuid::nil(),
-                        });
+            hosts.push(Host {
+                names: names
+                    .clone()
+                    .into_iter()
+                    .map(|n| n.as_ref().to_owned())
+                    .collect(),
+                macs: macs.clone().into_iter().collect(),
+                preferred_name: preferred_name.map(|n| n.to_owned()),
+                id: Uuid::nil(),
+            });
 
-                        index
-                    }
-                };
-
-                self.by_mac.entry(mac).or_insert(index);
-
-                if !self.by_name.contains_key(&name) {
-                    self.by_name.insert(name.clone(), index);
-                }
-
+            indexes.insert(index);
+        } else {
+            for &index in &indexes {
                 let host = &mut hosts[index];
+                host.macs.extend(macs.clone().into_iter());
+                host.names
+                    .extend(names.clone().into_iter().map(|n| n.as_ref().to_owned()));
+                host.preferred_name = preferred_name
+                    .map(|n| n.to_owned())
+                    .or(host.preferred_name.take());
+            }
+        }
 
-                if !host.names.contains(&name) {
-                    host.names.push(name.clone());
-                }
+        for mac in macs {
+            for &index in &indexes {
+                self.by_mac.insert(mac, index);
+            }
+        }
 
-                if !host.mac.contains(&mac) {
-                    host.mac.push(mac);
-                }
+        for name in names {
+            for &index in &indexes {
+                self.by_name.insert(name.as_ref().to_owned(), index);
             }
         }
     }
 }
 
 /// Spawn the host monitoring task.
-pub async fn spawn(state: State) {
+pub async fn spawn(state: State, config: Arc<Config>) {
     let mut hosts = Vec::new();
 
     let mut service = Service {
-        state: state.clone(),
         by_mac: HashMap::new(),
         by_name: HashMap::new(),
         reader: Reader::default(),
     };
 
     loop {
-        service.build_hosts(&mut hosts).await;
+        hosts.clear();
+
+        service.by_mac.clear();
+        service.by_name.clear();
+
+        for path in &state.inner.ether_paths {
+            let ethers = service.reader.read_ethers(path).await;
+
+            for (mac, name) in ethers {
+                service.add(&mut hosts, [mac], [name.as_str()], None);
+            }
+        }
+
+        service.from_config(&mut hosts, &config);
 
         for host in &mut hosts {
-            host.names.sort();
-            host.mac.sort();
             host.build_id();
         }
 
@@ -233,7 +275,7 @@ pub async fn spawn(state: State) {
                 break 'done;
             }
 
-            tracing::info!("updated hosts");
+            tracing::info!("Updated hosts");
 
             drop(existing);
             let mut write = state.inner.hosts.write().await;

@@ -1,4 +1,4 @@
 bind = "0.0.0.0:3000"
 
-[hosts."test.lan"]
-preferred_name = "test"
+[hosts."moore"]
+preferred_name = "moore.lan"

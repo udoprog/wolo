@@ -1,9 +1,9 @@
 use core::cell::RefCell;
 use core::fmt;
 use core::fmt::Write;
-use core::net::SocketAddr;
 use core::str::FromStr;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -15,7 +15,7 @@ use toml::Value;
 #[derive(Default)]
 pub struct Config {
     /// Address and port to bind the server to.
-    pub bind: Option<SocketAddr>,
+    pub bind: Option<String>,
     /// Loaded hosts.
     pub hosts: Vec<HostConfig>,
 }
@@ -23,9 +23,9 @@ pub struct Config {
 /// Loaded host configuration.
 pub struct HostConfig {
     /// Loaded host configurations.
-    pub macs: Vec<MacAddr6>,
+    pub macs: BTreeSet<MacAddr6>,
     /// Host names.
-    pub names: Vec<String>,
+    pub names: BTreeSet<String>,
     /// Preferred host name.
     pub preferred_name: Option<String>,
 }
@@ -48,15 +48,11 @@ impl Config {
         };
 
         for mac in new.macs {
-            if !host.macs.contains(&mac) {
-                host.macs.push(mac);
-            }
+            host.macs.insert(mac);
         }
 
         for name in new.names {
-            if !host.names.contains(&name) {
-                host.names.push(name);
-            }
+            host.names.insert(name);
         }
 
         host.preferred_name = new.preferred_name.or(host.preferred_name.take());
@@ -85,7 +81,7 @@ impl Config {
                         macs: parser
                             .take("macs", |p| p.iter(Parser::parse))
                             .unwrap_or_default(),
-                        names: vec![key.to_owned()],
+                        names: BTreeSet::from([key.to_owned()]),
                         preferred_name: parser.take("preferred_name", Parser::parse).flatten(),
                     });
 
@@ -98,8 +94,8 @@ impl Config {
 
                     if let Some(host) = Parser::new(value, hosts.diag).parse() {
                         self.add_host(HostConfig {
-                            macs: Vec::new(),
-                            names: vec![host],
+                            macs: BTreeSet::new(),
+                            names: BTreeSet::from([host]),
                             preferred_name: None,
                         });
                     }
@@ -107,8 +103,8 @@ impl Config {
             }
             Value::String(name) => {
                 self.add_host(HostConfig {
-                    macs: Vec::new(),
-                    names: vec![name.to_owned()],
+                    macs: BTreeSet::new(),
+                    names: BTreeSet::from([name.to_owned()]),
                     preferred_name: None,
                 });
             }
@@ -170,7 +166,10 @@ impl<'a> Parser<'a> {
         Some(output)
     }
 
-    fn iter<O>(self, mut iter: impl FnMut(Parser<'a>) -> Option<O>) -> Vec<O> {
+    fn iter<U, O>(self, mut iter: impl FnMut(Parser<'a>) -> Option<O>) -> U
+    where
+        U: FromIterator<O>,
+    {
         let mut out = Vec::new();
 
         match self.value {
@@ -190,7 +189,7 @@ impl<'a> Parser<'a> {
         }
 
         self.diag.pop();
-        out
+        U::from_iter(out)
     }
 
     fn check(self) {

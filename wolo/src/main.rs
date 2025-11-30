@@ -72,6 +72,8 @@ mod showcase;
 mod utils;
 mod wake_on_lan;
 
+const DEFAULT_BIND: &str = "0.0.0.0:3000";
+
 /// Path to load links from.
 #[derive(Clone)]
 pub struct S {
@@ -100,9 +102,9 @@ struct Opts {
     /// Path to load configuration files from.
     #[clap(long, default_value = "/etc/wolo/config.toml")]
     config: Vec<PathBuf>,
-    /// Address and port to bind the server to.
-    #[clap(long, default_value = "0.0.0.0:3000")]
-    bind: String,
+    /// Address and port to bind the server to. Defaults to `0.0.0.0:3000`.
+    #[clap(long)]
+    bind: Option<String>,
     /// Path to load an ethers file from. By default this is `/etc/ethers`.
     ///
     /// The files specified in here will be monitored for changes and reloaded
@@ -135,8 +137,6 @@ async fn main() -> ExitCode {
 }
 
 async fn inner() -> Result<(), anyhow::Error> {
-    tracing::info!("prepare server...");
-
     let templates = crate::utils::load_templates().context("templates")?;
 
     let opts = Opts::try_parse()?;
@@ -146,20 +146,23 @@ async fn inner() -> Result<(), anyhow::Error> {
     let mut has_errors = false;
 
     for path in &opts.config {
-        let diag = config::Diagnostics::new();
+        let d = config::Diagnostics::new();
+
         config
-            .add_from_path(path, &diag)
+            .add_from_path(path, &d)
             .with_context(|| path.display().to_string())?;
 
-        for error in diag.into_errors() {
+        for error in d.into_errors() {
             tracing::error!("{}: {error}", path.display());
             has_errors = true;
         }
     }
 
     if has_errors {
-        return Err(anyhow!("configuration had errors"));
+        return Err(anyhow!("Configuration had errors"));
     }
+
+    let config = Arc::new(config);
 
     let showcase = showcase::new(opts.showcase);
 
@@ -170,7 +173,7 @@ async fn inner() -> Result<(), anyhow::Error> {
     }
 
     let hosts = hosts.build();
-    let hosts_handle = tokio::spawn(hosts::spawn(hosts.clone()));
+    let hosts_handle = tokio::spawn(hosts::spawn(hosts.clone(), config.clone()));
 
     let ping_state = ping_loop::State::new();
     let pinger_handle = task::spawn(ping_loop::new(ping_state.clone(), hosts.clone()));
@@ -190,7 +193,11 @@ async fn inner() -> Result<(), anyhow::Error> {
         )
         .fallback(get(static_handler));
 
-    tracing::info!("starting server...");
+    let bind = opts
+        .bind
+        .as_deref()
+        .or(config.bind.as_deref())
+        .unwrap_or(DEFAULT_BIND);
 
     let listener = if let Some(listener) =
         try_listener_from_env("LISTEN_FDS").context("setting up listen fd")?
@@ -198,12 +205,12 @@ async fn inner() -> Result<(), anyhow::Error> {
         tracing::info!("received socket through LISTEN_FDS");
         listener
     } else {
-        let listener = TcpListener::bind(&opts.bind)
+        let listener = TcpListener::bind(&bind)
             .await
             .context("binding to address")?;
 
         let addr = listener.local_addr()?;
-        tracing::info!("listening on http://{addr}");
+        tracing::info!("Listening on http://{addr}");
         listener
     };
 
@@ -242,6 +249,8 @@ fn try_listener_from_env(env: &'static str) -> Result<Option<TcpListener>, anyho
         return Ok(None);
     }
 
+    // NB: This is currently broken since what's passed in is a single connected
+    // peer, not a listening socket.
     let listener = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
     listener.set_nonblocking(true).context("set nonblocking")?;
     let listener = TcpListener::from_std(listener).context("converting to tcp listener")?;
