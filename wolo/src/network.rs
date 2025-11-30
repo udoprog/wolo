@@ -42,7 +42,7 @@ pub(super) async fn router(
 ) -> Router {
     let home = Arc::new(home.build().await);
 
-    let router = Router::new()
+    Router::new()
         .route("/", get(entry))
         .route("/wake", post(wake))
         .with_state(S {
@@ -52,9 +52,7 @@ pub(super) async fn router(
             hosts,
             showcase,
             home,
-        });
-
-    router
+        })
 }
 
 #[derive(Deserialize)]
