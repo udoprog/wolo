@@ -3,6 +3,8 @@ name = "wolo"
 edition = "2024"
 publish = false
 rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+description = "A lightweight rust service to do basic network monitoring."
 
 [dependencies]
 lib = { path = "../lib" }
