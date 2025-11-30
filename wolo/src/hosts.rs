@@ -13,19 +13,19 @@ use uuid::Uuid;
 
 /// Builder for the host monitoring state.
 pub struct Builder {
-    ethers: Vec<PathBuf>,
+    ether_paths: Vec<PathBuf>,
 }
 
 impl Builder {
     /// Add a path to an ethers file to monitor.
     pub fn add_ethers_path(&mut self, path: &Path) {
-        self.ethers.push(path.to_owned());
+        self.ether_paths.push(path.to_owned());
     }
 
     /// Build the host monitoring state.
     pub fn build(self) -> State {
         let inner = Inner {
-            ethers: self.ethers,
+            ether_paths: self.ether_paths,
             hosts: RwLock::new(Vec::new()),
         };
 
@@ -36,7 +36,7 @@ impl Builder {
 }
 
 struct Inner {
-    ethers: Vec<PathBuf>,
+    ether_paths: Vec<PathBuf>,
     hosts: RwLock<Vec<Host>>,
 }
 
@@ -92,7 +92,9 @@ impl State {
 impl State {
     /// Create a new builder for the host monitoring state.
     pub fn builder() -> Builder {
-        Builder { ethers: Vec::new() }
+        Builder {
+            ether_paths: Vec::new(),
+        }
     }
 }
 
@@ -151,9 +153,10 @@ impl Service {
     async fn build_hosts(&mut self, hosts: &mut Vec<Host>) {
         self.by_mac.clear();
         self.by_name.clear();
+
         hosts.clear();
 
-        for ether in &self.state.inner.ethers {
+        for ether in &self.state.inner.ether_paths {
             let ethers = self.reader.read_ethers(ether).await;
 
             for (mac, name) in ethers {

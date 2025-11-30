@@ -62,6 +62,7 @@ use tokio::task;
 use crate::embed::Base64;
 use crate::utils::Templates;
 
+mod config;
 mod embed;
 mod host_name_cache;
 mod hosts;
@@ -96,6 +97,9 @@ impl IntoResponse for StaticFile {
 
 #[derive(Parser)]
 struct Opts {
+    /// Path to load configuration files from.
+    #[clap(long, default_value = "/etc/wolo/config.toml")]
+    config: Vec<PathBuf>,
     /// Address and port to bind the server to.
     #[clap(long, default_value = "0.0.0.0:3000")]
     bind: String,
@@ -136,6 +140,26 @@ async fn inner() -> Result<(), anyhow::Error> {
     let templates = crate::utils::load_templates().context("templates")?;
 
     let opts = Opts::try_parse()?;
+
+    let mut config = config::Config::default();
+
+    let mut has_errors = false;
+
+    for path in &opts.config {
+        let diag = config::Diagnostics::new();
+        config
+            .add_from_path(path, &diag)
+            .with_context(|| path.display().to_string())?;
+
+        for error in diag.into_errors() {
+            tracing::error!("{}: {error}", path.display());
+            has_errors = true;
+        }
+    }
+
+    if has_errors {
+        return Err(anyhow!("configuration had errors"));
+    }
 
     let showcase = showcase::new(opts.showcase);
 
