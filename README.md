@@ -17,12 +17,19 @@ wolo --bind 0.0.0.0:3000 --home home.md
 The `home.md` is used to populate the landing page, see [Landing
 Page](#landing-page) below for how to configure this.
 
-![home](home.png)
-
 The `/network` page show an overview of the state of hosts on the network
 and the ability to wake them up if they have configured mac addresses.
 
-![showcase](showcase.png)
+<table>
+<tr>
+<td valign="top"><img alt="Default Landing Page" src="https://github.com/udoprog/wolo/blob/main/gfx/home.png?raw=true" /></td>
+<td valign="top"><img alt="Network Page" src="https://github.com/udoprog/wolo/blob/main/gfx/network.png?raw=true" /></td>
+<td valign="top"><img alt="Network Page in lynx" src="https://github.com/udoprog/wolo/blob/main/gfx/lynx.png?raw=true" /></td>
+</td>
+</table>
+
+> **wolo** has a reactive design which works well on mobiles and all the
+> pages work with a basic browser *without* JavaScript.
 
 <br>
 
