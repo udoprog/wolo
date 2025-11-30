@@ -1,0 +1,2 @@
+lib_badges = ["-crates.io", "+discord"]
+readme_badges = ["-crates.io", "+discord"]

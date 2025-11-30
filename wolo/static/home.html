@@ -1,0 +1,15 @@
+{% extends "layout.html" %}
+
+{% block title %}{{title}}{% endblock %}
+
+{% block content %}
+<h1>{{title}}</h1>
+
+{% if text is defined and text|length > 0 %}
+<p>{{text}}</p>
+{% endif %}
+
+{% for link in links %}
+<a class="block link" href="{{link.href}}">{{link.title}}</a>
+{% endfor %}
+{% endblock %}

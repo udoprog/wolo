@@ -1,0 +1,167 @@
+html {
+    font-family: Manrope, Arial, Helvetica, sans-serif;
+    font-size: 24px;
+    margin: 1em;
+    background-color: #f9f9f9;
+}
+
+button {
+    font-size: inherit;
+}
+
+a {
+    text-decoration: none;
+    color: #1a0dab;
+}
+
+h1, h4 {
+    color: #333333;
+}
+
+h1 {
+    font-size: 2em;
+    margin-top: 0;
+    margin-bottom: 0.5em;
+}
+
+h4 {
+    font-size: 1.2em;
+    margin-top: 0;
+    margin-bottom: 0.5em;
+}
+
+.mono {
+    font-family: "Courier New", Courier, monospace;
+}
+
+button.primary {
+    display: block;
+    color: white;
+    background-color: #4CAF50;
+    width: 100%;
+    padding: 0.2em;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+button:hover {
+    background-color: #45a049;
+}
+
+.copy {
+    cursor: pointer;
+    user-select: none;
+    margin-left: 0.2em;
+}
+
+.block {
+    display: block;
+    padding: 0.5em;
+    background-color: #ecececff;
+    border: 1px solid #bbbbbbff;
+    border-radius: 4px;
+}
+
+.block:not(:first-child) {
+    margin-top: 1em;
+}
+
+.block:not(:last-child) {
+    margin-bottom: 1em;
+}
+
+.row.error {
+    color: #a81d1d;
+    font-weight: bold;
+}
+
+.row:not(:first-child) {
+    margin-top: 0.5em;
+}
+
+.row:not(:last-child) {
+    margin-bottom: 0.5em;
+}
+
+.records {
+    font-size: 0.6em;
+    margin-left: auto;
+    margin-right: auto;
+    width: auto;
+    padding: 0.5em;
+    background-color: #ffffffcc;
+    border: 1px solid #bbbbbbff;
+    border-radius: 4px;
+    border-spacing: 1em;
+    overflow-x: scroll;
+}
+
+.records > .title {
+    font-weight: bold;
+}
+
+.records > .record:not(:first-child) {
+    margin-top: 0.5em;
+}
+
+.records > .record:not(:last-child) {
+    margin-bottom: 0.5em;
+}
+
+.records > .record.error .value {
+    color: #a81d1d;
+    font-weight: bold;
+}
+
+.records > .record.success .value {
+    color: #008000;
+    font-weight: bold;
+}
+
+.just-woke {
+    color: #008000;
+    font-weight: bold;
+    font-size: 0.8em;
+}
+
+.link {
+    font-size: 1.2em;
+}
+
+@media (min-width: 768px) {
+    html {
+        font-size: 14px;
+        background-color: #f0f0f0;
+    }
+
+    .container {
+        max-width: 800px;
+        margin-left: auto;
+        margin-right: auto;
+        padding: 1em;
+        background-color: #ffffff;
+        border: 1px solid #cccccc;
+        border-radius: 8px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    }
+
+    .records {
+        font-size: inherit;
+    }
+
+    button.primary {
+        max-width: 120px;
+    }
+
+    .block {
+        text-align: center;
+    }
+
+    .pings > .ping {
+        display: inline-block;
+        width: 260px;
+        margin: 0.5em;
+        text-align: left;
+    }
+}
