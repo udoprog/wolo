@@ -1,6 +1,6 @@
 //! Simple network monitor capable of sending magic Wake-on-LAN packets.
 //!
-//! Populate `/etc/ethers` (see `man ethers`) and run with:
+//! Populate `/etc/ethers` (see `man ethers`) and/or `/etc/hosts` and run with:
 //!
 //! ```sh
 //! wolo --bind 0.0.0.0:3000 --home home.md
@@ -29,7 +29,7 @@
 //!
 //! <br>
 //!
-//! ## Configuration
+//! ## More configuration
 //!
 //! The wolo service can take configuration from multiple sources:
 //!
@@ -64,14 +64,6 @@
 //! # `--ignore-host` option.
 //! ignore = false
 //! ```
-//!
-//! <br>
-//!
-//! ## Options
-//!
-//! You can configure wolo with the following CLI options:
-//! * Multiple `--ethers` arguments can be added to load `/etc/ethers` entries from
-//!   multiple files. By default this is just set to `/etc/ethers`.
 
 #![allow(clippy::drain_collect)]
 
