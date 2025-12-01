@@ -1,5 +1,5 @@
 {% extends "layout.html" %}
-{% set auto_refresh = 2000 %}
+{% set auto_refresh = 1000 %}
 
 {% block footer %}
 <script type="module" src="/network.js?{{ hash }}"></script>
@@ -50,6 +50,11 @@
         </div>
         {% endif %}
 
+        <div class="record sequence" title="ICMP Sequence">
+            <b>Sequence:</b>
+            <span class="value mono">{{ r.sequence | hex }}</span>
+        </div>
+
         <div class="record" title="ICMP Target">
             <b>Target:</b>
             <span class="value copyable mono">{{ r.target }}</span><span class="copy">📋</span>
@@ -98,13 +103,21 @@
     <div class="row records">
         <div class="record error" title="Ping Error">
             <b>Error:</b>
+
             <span class="value">{{ e.error }}</span>
         </div>
 
-        {% if e.ping %}
+        {% if e.address is defined %}
             <div class="record" title="Ping Target">
-                <b>Target:</b>
-                <span class="copyable mono">{{ e.ping }}</span><span class="copy">📋</span>
+                <b>Address:</b>
+                <span class="copyable mono">{{ e.address }}</span><span class="copy">📋</span>
+            </div>
+        {% endif %}
+
+        {% if e.host is defined %}
+            <div class="record" title="Ping Target">
+                <b>Host:</b>
+                <span class="copyable mono">{{ e.host }}</span><span class="copy">📋</span>
             </div>
         {% endif %}
 

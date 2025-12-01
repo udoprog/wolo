@@ -3,7 +3,6 @@ use core::net::IpAddr;
 use core::time::Duration;
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -13,6 +12,7 @@ use axum::response::{Html, Redirect};
 use axum::routing::{get, post};
 use axum_extra::extract::Form;
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::embed::Base64;
@@ -88,7 +88,10 @@ async fn entry(
     #[derive(Serialize)]
     struct PingError {
         error: String,
-        ping: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
         age: String,
     }
 
@@ -98,6 +101,7 @@ async fn entry(
         kind: String,
         outcome: String,
         code: Option<String>,
+        sequence: u16,
         target: IpAddr,
         source: IpAddr,
         dest: IpAddr,
@@ -158,7 +162,8 @@ async fn entry(
                 for e in &pending.errors {
                     errors.push(PingError {
                         error: e.error.clone(),
-                        ping: e.ping.map(|p| p.to_string()),
+                        address: e.kind.as_address().map(|a| showcase.ip(a).to_string()),
+                        host: e.kind.as_host().map(|n| showcase.host_name(host.id, n)),
                         age: duration(now.duration_since(e.sampled)).to_string(),
                     });
                 }
@@ -192,6 +197,7 @@ async fn entry(
                         },
                         kind: r.kind.to_string(),
                         outcome: r.outcome.to_string(),
+                        sequence: r.sequence,
                         code,
                         target: showcase.ip(r.target),
                         source: showcase.ip(r.source),
@@ -235,36 +241,36 @@ fn duration(d: Duration) -> impl fmt::Display {
 
     impl fmt::Display for D {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let secs = self.0.as_secs();
+            let mut secs = self.0.as_secs();
 
-            if secs > 86400 {
-                return write!(f, "{} d", secs / 86400);
+            if secs >= 86400 {
+                write!(f, "{}d", secs / 86400)?;
+                secs %= 86400;
             }
 
-            if secs > 3600 {
-                return write!(f, "{} h", secs / 3600);
+            if secs >= 3600 {
+                write!(f, "{}H", secs / 3600)?;
+                secs %= 3600;
             }
 
-            if secs > 60 {
-                write!(f, "{} m", secs / 60)?;
-                return Ok(());
+            if secs >= 60 {
+                write!(f, "{}m", secs / 60)?;
+                secs %= 60;
+            }
+
+            if secs > 0 {
+                return write!(f, "{}s", secs);
             }
 
             let nanos = self.0.subsec_nanos();
 
-            let millis = nanos / 1_000_000;
-
-            if millis > 0 {
-                return write!(f, "{secs}.{millis:03} s");
+            if nanos >= 1_000_000 {
+                let millis = nanos / 1_000_000;
+                return write!(f, "{millis}ms");
             }
 
             let micros = nanos / 1_000;
-
-            if micros > 0 {
-                return write!(f, "{millis}.{micros:03} ms");
-            }
-
-            write!(f, "{secs}.{nanos:03} µs")
+            write!(f, "{micros}µs")
         }
     }
 

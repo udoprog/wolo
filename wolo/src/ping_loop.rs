@@ -1,22 +1,24 @@
 use core::fmt;
-use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use core::pin::pin;
 use core::time::Duration;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context, Error};
-use lib::{Buffer, Outcome, Pinger};
+use async_fuse::Fuse;
+use lib::{Buffer, Outcome, Pinger, Response};
 use tokio::sync::Mutex;
-use tokio::time;
+use tokio::task::JoinSet;
+use tokio::time::{self, Instant};
 use uuid::Uuid;
 
-use crate::host_name_cache::{CacheNameResult, HostNameCache, HostNameCacheLookup};
+use crate::host_name_cache::{CacheNameResult, HostNameCache};
 use crate::hosts;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+const NEXT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -24,6 +26,7 @@ pub struct PingResult {
     pub kind: PingKind,
     pub outcome: Outcome,
     pub code: u8,
+    pub sequence: u16,
     pub rtt: Duration,
     pub sampled: Instant,
     pub target: IpAddr,
@@ -49,18 +52,48 @@ impl fmt::Display for PingKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 #[non_exhaustive]
-pub struct Pending {
-    pub id: Uuid,
+pub struct Pinged {
     pub errors: Vec<PingError>,
     pub results: Vec<PingResult>,
+}
+
+impl Pinged {
+    pub fn result(&mut self, result: PingResult) {
+        self.errors
+            .retain(|e| e.kind.as_address() != Some(result.target));
+
+        if let Some(r) = self.results.iter_mut().find(|r| r.target == result.target) {
+            *r = result;
+            return;
+        }
+
+        self.results.push(result);
+        self.results.sort_by_key(|r| r.target);
+    }
+
+    /// Add a ping error, replacing any existing error of the same kind.
+    pub fn error(&mut self, error: PingError) {
+        if let PingErrorKind::Address(addr) = error.kind {
+            self.results.retain(|r| r.target != addr);
+        }
+
+        if let Some(e) = self.errors.iter_mut().find(|e| e.kind == error.kind) {
+            *e = error;
+            return;
+        }
+
+        self.errors.retain(|e| e.kind != error.kind);
+        self.errors.push(error);
+        self.errors.sort_by(|a, b| a.kind.cmp(&b.kind));
+    }
 }
 
 #[derive(Clone)]
 pub struct State {
     /// Hosts that have been pinged.
-    pub pinged: Arc<Mutex<HashMap<Uuid, Pending>>>,
+    pub pinged: Arc<Mutex<HashMap<Uuid, Pinged>>>,
 }
 
 impl State {
@@ -73,32 +106,37 @@ impl State {
     }
 }
 
+/// The kind of ping error.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum PingErrorKind {
+    Address(IpAddr),
+    Host(String),
+}
+
+impl PingErrorKind {
+    /// Coerces to an address if possible.
+    pub fn as_address(&self) -> Option<IpAddr> {
+        match self {
+            PingErrorKind::Address(addr) => Some(*addr),
+            PingErrorKind::Host(_) => None,
+        }
+    }
+
+    /// Coerces to a host name if possible.
+    pub fn as_host(&self) -> Option<&str> {
+        match self {
+            PingErrorKind::Address(_) => None,
+            PingErrorKind::Host(name) => Some(name),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PingError {
     pub error: String,
-    pub ping: Option<IpAddr>,
+    pub kind: PingErrorKind,
     pub sampled: Instant,
-}
-
-struct Task {
-    id: Uuid,
-    handle: HostNameCacheLookup,
-}
-
-struct Resolve {
-    id: Uuid,
-    addresses: BTreeSet<SocketAddr>,
-    errors: Vec<PingError>,
-}
-
-impl Resolve {
-    fn new(id: Uuid) -> Self {
-        Self {
-            id,
-            addresses: BTreeSet::new(),
-            errors: Vec::new(),
-        }
-    }
 }
 
 struct PingerService {
@@ -106,96 +144,55 @@ struct PingerService {
     v6: Pinger,
     b1: Buffer,
     b2: Buffer,
-    seen: HashSet<Uuid>,
-    waiting: HashMap<u64, (usize, Instant, IpAddr)>,
-    pending: Vec<Pending>,
     id: u64,
-    tasks: Vec<Task>,
-    resolved: Vec<Resolve>,
 }
 
 impl PingerService {
-    async fn setup_pings(&mut self) {
-        for Resolve {
-            id,
-            addresses,
-            mut errors,
-        } in self.resolved.drain(..)
-        {
-            let index = self.pending.len();
-
-            for address in addresses {
-                let next = self.id.to_be_bytes();
-                let started = Instant::now();
-
-                match address {
-                    SocketAddr::V4(addr) => {
-                        let ip = addr.ip();
-
-                        pub fn is_unicast(addr: &Ipv4Addr) -> bool {
-                            !addr.is_multicast()
-                                && !addr.is_loopback()
-                                && !addr.is_link_local()
-                                && !addr.is_broadcast()
-                                && !addr.is_documentation()
-                                && !addr.is_unspecified()
-                        }
-
-                        if !is_unicast(ip) {
-                            continue;
-                        }
-
-                        if let Err(error) = self.v4.ping(&mut self.b1, IpAddr::V4(*ip), &next).await
-                        {
-                            errors.push(PingError {
-                                error: format!("{error}"),
-                                ping: Some(address.ip()),
-                                sampled: started,
-                            });
-                        } else {
-                            self.waiting.insert(self.id, (index, started, address.ip()));
-                        }
-                    }
-                    SocketAddr::V6(addr) => {
-                        let ip = addr.ip();
-
-                        pub fn is_unicast(addr: &Ipv6Addr) -> bool {
-                            !addr.is_multicast()
-                                && !addr.is_loopback()
-                                && !addr.is_unicast_link_local()
-                                && !addr.is_unspecified()
-                        }
-
-                        if !is_unicast(ip) {
-                            continue;
-                        }
-
-                        if let Err(error) = self.v6.ping(&mut self.b2, IpAddr::V6(*ip), &next).await
-                        {
-                            errors.push(PingError {
-                                error: format!("{error}"),
-                                ping: Some(address.ip()),
-                                sampled: started,
-                            });
-                        } else {
-                            self.waiting.insert(self.id, (index, started, address.ip()));
-                        }
-                    }
+    async fn ping(&mut self, address: IpAddr) -> Result<Option<u64>, Error> {
+        match address {
+            IpAddr::V4(ip) => {
+                pub fn is_unicast(addr: &Ipv4Addr) -> bool {
+                    !addr.is_multicast()
+                        && !addr.is_loopback()
+                        && !addr.is_link_local()
+                        && !addr.is_broadcast()
+                        && !addr.is_documentation()
+                        && !addr.is_unspecified()
                 }
 
-                self.id = self.id.wrapping_add(1);
-            }
+                if !is_unicast(&ip) {
+                    return Ok(None);
+                }
 
-            self.pending.push(Pending {
-                id,
-                errors,
-                results: Vec::new(),
-            });
+                let id = self.id;
+                let bytes = id.to_be_bytes();
+                self.v4.ping(&mut self.b1, IpAddr::V4(ip), &bytes).await?;
+                self.id = self.id.wrapping_add(1);
+                Ok(Some(id))
+            }
+            IpAddr::V6(ip) => {
+                pub fn is_unicast(addr: &Ipv6Addr) -> bool {
+                    !addr.is_multicast()
+                        && !addr.is_loopback()
+                        && !addr.is_unicast_link_local()
+                        && !addr.is_unspecified()
+                }
+
+                if !is_unicast(&ip) {
+                    return Ok(None);
+                }
+
+                let id = self.id;
+                let bytes = id.to_be_bytes();
+                self.v6.ping(&mut self.b2, IpAddr::V6(ip), &bytes).await?;
+                self.id = self.id.wrapping_add(1);
+                Ok(Some(id))
+            }
         }
     }
 
-    async fn wait_for_result(&mut self) -> Result<(), Error> {
-        let (r, kind, b) = tokio::select! {
+    async fn wait_for_result(&mut self) -> Result<(Response, PingKind, u64), Error> {
+        let (response, kind, b) = tokio::select! {
             r = self.v4.recv(&mut self.b1) => {
                 (r?, PingKind::V4, &self.b1)
             }
@@ -204,151 +201,252 @@ impl PingerService {
             }
         };
 
-        let bytes = b.read::<[u8; 8]>().context("reading response payload")?;
+        let bytes = *b.read::<[u8; 8]>().context("reading response payload")?;
+        let id = u64::from_be_bytes(bytes);
+        Ok((response, kind, id))
+    }
+}
 
-        let id = u64::from_be_bytes(*bytes);
+pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> {
+    #[derive(Debug)]
+    enum What {
+        Ping,
+        Timeout,
+    }
 
-        if let Some((index, started, target)) = self.waiting.remove(&id) {
-            let rtt = started.elapsed();
+    #[derive(Debug)]
+    struct Task {
+        id: Uuid,
+        addr: IpAddr,
+        next: Instant,
+        what: What,
+    }
 
-            if let Some(pending) = self.pending.get_mut(index) {
-                pending.results.push(PingResult {
+    #[derive(Debug, Clone, Copy)]
+    struct Deferred {
+        id: Uuid,
+        addr: IpAddr,
+        started: Instant,
+    }
+
+    let mut service = PingerService {
+        v4: Pinger::v4()?,
+        v6: Pinger::v6()?,
+        b1: Buffer::new(),
+        b2: Buffer::new(),
+        id: 0u64,
+    };
+
+    // A host cache.
+    let mut cache = HostNameCache::new();
+    // Update host list every 10 seconds.
+    let mut cache_eviction = time::interval(Duration::from_secs(10));
+    // Working set of host ids.
+    let mut new = HashSet::new();
+    // Hosts we've already seen.
+    let mut old = HashSet::new();
+    // Domain lookup tasks.
+    let mut domain = JoinSet::new();
+    // Map of host ids to their domain pinger tasks.
+    let mut domains = BTreeMap::<Uuid, Arc<CacheNameResult>>::new();
+    // Pending pings.
+    let mut deferred = HashMap::<u64, Deferred>::new();
+
+    // Wakeup for next ping.
+    let mut tasks = HashMap::<(Uuid, IpAddr), Task>::new();
+    let mut sleep = pin!(Fuse::empty());
+    let mut update = false;
+
+    loop {
+        if update {
+            if let Some((key, task)) = tasks.iter().min_by_key(|(_, task)| task.next) {
+                let key = *key;
+                let deadline = task.next;
+
+                sleep.set(Fuse::new(async move {
+                    _ = time::sleep_until(deadline).await;
+                    key
+                }));
+            } else {
+                sleep.set(Fuse::empty());
+            }
+
+            update = false;
+        }
+
+        tokio::select! {
+            _ = cache_eviction.tick() => {
+                cache.evict_old().await;
+
+                new.clear();
+
+                for host in hosts.hosts().await.iter() {
+                    new.insert(host.id);
+
+                    let lookup = cache.get(host).await;
+                    let id = host.id;
+
+                    domain.spawn(async move {
+                        let result = lookup.get().await;
+                        (id, result)
+                    });
+                }
+
+                if new != old {
+                    for id in old.difference(&new) {
+                        tasks.retain(|_, t| t.id != *id);
+                        domains.remove(id);
+                        deferred.retain(|_, d| d.id != *id);
+                        state.pinged.lock().await.remove(id);
+                    }
+
+                    update = true;
+
+                    old.clear();
+                    old.extend(new.iter().copied());
+                }
+            }
+            result = domain.join_next(), if !domain.is_empty() => {
+                let Some(result) = result else {
+                    continue;
+                };
+
+                let (id, result) = result.context("domain task panicked")?;
+                let new = result.context("domain lookup failed")?;
+
+                if let Some(old) = domains.get(&id) && *new == **old {
+                    continue;
+                }
+
+                tracing::info!(?id, ?new, "domain updates");
+
+                tasks.retain(|_, t| t.id != id);
+                deferred.retain(|_, d| d.id != id);
+
+                let mut pinged = state.pinged.lock().await;
+                let p = pinged.entry(id).or_default();
+
+                p.errors.clear();
+                p.results.clear();
+
+                let now = Instant::now();
+
+                for error in new.errors.iter() {
+                    p.error(PingError {
+                        error: error.error.to_string(),
+                        kind: PingErrorKind::Host(error.name.clone()),
+                        sampled: now,
+                    });
+                }
+
+                for &addr in new.addresses.iter() {
+                    tracing::trace!(?id, ?addr, "scheduling ping");
+                    tasks.insert((id, addr), Task { id, addr, next: now, what: What::Ping });
+                    update = true;
+                }
+
+                domains.insert(id, new.clone());
+            }
+            result = service.wait_for_result() => {
+                let Ok((r, kind, id)) = result else {
+                    continue;
+                };
+
+                let Some(d) = deferred.remove(&id) else {
+                    tracing::trace!(?id, "missing deferred ping response");
+                    continue;
+                };
+
+                tracing::trace!(?id, ?d.id, ?d.addr, "received ping response");
+
+                let Some(t) = tasks.get_mut(&(d.id, d.addr)) else {
+                    continue;
+                };
+
+                let mut pinged = state.pinged.lock().await;
+
+                let now = Instant::now();
+
+                let p = pinged.entry(d.id).or_default();
+
+                p.result(PingResult {
                     kind,
                     outcome: r.outcome,
                     code: r.code,
-                    rtt,
-                    sampled: Instant::now(),
-                    target,
+                    sequence: r.sequence,
+                    rtt: now.saturating_duration_since(d.started),
+                    sampled: now,
+                    target: d.addr,
                     source: r.source,
                     dest: r.dest,
                     checksum: r.checksum,
                     expected_checksum: r.expected_checksum,
                 });
+
+                t.next = now + NEXT;
+                t.what = What::Ping;
+                update = true;
             }
-        }
+            key = sleep.as_mut() => {
+                let remove = 'done: {
+                    let Some(t) = tasks.get_mut(&key) else {
+                        break 'done false;
+                    };
 
-        Ok(())
-    }
-}
+                    let now = Instant::now();
 
-pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> {
-    let mut s = PingerService {
-        v4: Pinger::v4()?,
-        v6: Pinger::v6()?,
-        b1: Buffer::new(),
-        b2: Buffer::new(),
-        seen: HashSet::new(),
-        waiting: HashMap::new(),
-        pending: Vec::new(),
-        id: 0u64,
-        tasks: Vec::new(),
-        resolved: Vec::new(),
-    };
+                    match t.what {
+                        What::Ping => {
+                            tracing::trace!(?t, "pinging");
 
-    let mut cache = HostNameCache::new();
+                            let ping_id = match service.ping(t.addr).await {
+                                Ok(ping_id) => ping_id,
+                                Err(error) => {
+                                    state.pinged.lock().await.entry(t.id).or_default().error(PingError {
+                                        error: error.to_string(),
+                                        kind: PingErrorKind::Address(t.addr),
+                                        sampled: now,
+                                    });
 
-    loop {
-        s.seen.clear();
+                                    t.next = now + NEXT;
+                                    t.what = What::Ping;
+                                    break 'done false;
+                                }
+                            };
 
-        cache.evict_old().await;
+                            let Some(ping_id) = ping_id else {
+                                break 'done true;
+                            };
 
-        for host in hosts.hosts().await.iter() {
-            if !s.seen.insert(host.id) {
-                continue;
-            }
+                            deferred.insert(ping_id, Deferred { id: t.id, addr: t.addr, started: now });
 
-            s.tasks.push(Task {
-                id: host.id,
-                handle: cache.get(host).await,
-            });
-        }
+                            t.next = now + TIMEOUT;
+                            t.what = What::Timeout;
+                            false
+                        }
+                        What::Timeout => {
+                            let mut p = state.pinged.lock().await;
+                            let p = p.entry(t.id).or_default();
 
-        for Task { id, handle } in s.tasks.drain(..) {
-            let mut resolve = Resolve::new(id);
+                            p.error(PingError {
+                                error: String::from("timeout"),
+                                kind: PingErrorKind::Address(t.addr),
+                                sampled: now,
+                            });
 
-            let results = match handle.get().await {
-                Ok(results) => results,
-                Err(error) => {
-                    resolve.errors.push(PingError {
-                        error: error.to_string(),
-                        ping: None,
-                        sampled: Instant::now(),
-                    });
-
-                    s.resolved.push(resolve);
-                    continue;
-                }
-            };
-
-            let sampled = Instant::now();
-
-            for result in results.iter() {
-                match result {
-                    CacheNameResult::Address(addr) => {
-                        resolve.addresses.insert(*addr);
-                    }
-                    CacheNameResult::Error(error) => {
-                        resolve.errors.push(PingError {
-                            error: format!("{}: {}", error.name, error.error),
-                            ping: None,
-                            sampled,
-                        });
-                    }
-                }
-            }
-
-            s.resolved.push(resolve);
-        }
-
-        s.setup_pings().await;
-
-        let mut timeout = pin!(time::sleep(TIMEOUT));
-
-        while !s.waiting.is_empty() {
-            tokio::select! {
-                _ = timeout.as_mut() => {
-                    break;
-                }
-                result = s.wait_for_result() => {
-                    if let Err(error) = result {
-                        tracing::error!("Receive error: {error}");
-                        let mut source = error.source();
-
-                        while let Some(err) = source {
-                            tracing::error!("Caused by: {err}");
-                            source = err.source();
+                            t.next = now + NEXT;
+                            t.what = What::Ping;
+                            false
                         }
                     }
+                };
+
+                if remove {
+                    tasks.remove(&key);
                 }
+
+                update = true;
             }
         }
-
-        let sampled = Instant::now();
-
-        for (_, (index, _, addr)) in s.waiting.drain() {
-            if let Some(p) = s.pending.get_mut(index) {
-                p.errors.push(PingError {
-                    error: "timeout".to_owned(),
-                    ping: Some(addr),
-                    sampled,
-                });
-            }
-        }
-
-        for p in &mut s.pending {
-            p.results.sort_by_key(|r| (r.kind, r.source));
-            p.errors.sort_by_key(|e| e.ping);
-        }
-
-        {
-            let mut pinged = state.pinged.lock().await;
-            pinged.clear();
-
-            for p in s.pending.drain(..) {
-                pinged.insert(p.id, p);
-            }
-        }
-
-        timeout.await;
     }
 }

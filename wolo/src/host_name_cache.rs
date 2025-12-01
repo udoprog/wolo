@@ -1,6 +1,7 @@
+use core::net::IpAddr;
 use core::time::Duration;
-use std::collections::HashMap;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::collections::{BTreeSet, HashMap};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,26 +42,27 @@ impl HostNameCache {
         let names = host.names.clone();
 
         let handle = task::spawn_blocking(move || {
-            let mut results = Vec::new();
+            let mut errors = Vec::new();
+            let mut results = BTreeSet::new();
 
             for name in names {
                 match (name.as_str(), 0).to_socket_addrs() {
                     Err(error) => {
-                        results.push(CacheNameResult::Error(NameError {
+                        errors.push(NameError {
                             name,
                             error: format!("{error}"),
-                        }));
+                        });
                         continue;
                     }
                     Ok(result) => {
                         for addr in result {
-                            results.push(CacheNameResult::Address(addr));
+                            results.insert(addr.ip());
                         }
                     }
                 }
             }
 
-            results
+            (errors, results.into_iter().collect())
         });
 
         HostNameCacheLookup {
@@ -84,14 +86,14 @@ impl HostNameCache {
 }
 
 /// A result from a cache name lookup.
-#[derive(Clone)]
-pub enum CacheNameResult {
-    Error(NameError),
-    Address(SocketAddr),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheNameResult {
+    pub errors: Vec<NameError>,
+    pub addresses: Vec<IpAddr>,
 }
 
 /// A name lookup error.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameError {
     /// The name that was looked up.
     pub name: String,
@@ -106,13 +108,13 @@ pub struct HostNameCacheLookup {
 
 impl HostNameCacheLookup {
     /// Get the results of the lookup.
-    pub async fn get(self) -> Result<Arc<[CacheNameResult]>> {
+    pub async fn get(self) -> Result<Arc<CacheNameResult>> {
         match self.kind {
             InnerKind::Found { results } => Ok(results),
             InnerKind::Handle { id, map, handle } => {
-                let results = Arc::<[CacheNameResult]>::from(
-                    handle.await.context("name lookup task panicked")?,
-                );
+                let (errors, addresses) = handle.await.context("host name lookup task panicked")?;
+
+                let results = Arc::<CacheNameResult>::from(CacheNameResult { errors, addresses });
                 let mut map = map.write().await;
 
                 map.insert(
@@ -131,16 +133,16 @@ impl HostNameCacheLookup {
 
 enum InnerKind {
     Found {
-        results: Arc<[CacheNameResult]>,
+        results: Arc<CacheNameResult>,
     },
     Handle {
         id: Uuid,
         map: Arc<RwLock<HashMap<Uuid, HostNameEntry>>>,
-        handle: JoinHandle<Vec<CacheNameResult>>,
+        handle: JoinHandle<(Vec<NameError>, Vec<IpAddr>)>,
     },
 }
 
 struct HostNameEntry {
-    results: Arc<[CacheNameResult]>,
+    results: Arc<CacheNameResult>,
     last: Instant,
 }

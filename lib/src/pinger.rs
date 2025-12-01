@@ -353,13 +353,6 @@ impl Pinger {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     ready.clear_ready();
                 }
-                Err(err) if readable && err.kind() == io::ErrorKind::ConnectionRefused => {
-                    // Ignore connection refused. This has no meaning for DGRAM
-                    // sockets, but for the ICMP protocol we get connection
-                    // refused once which is then cleared when reading for every
-                    // error we receive.
-                    continue;
-                }
                 Err(err) => return Err(Error::new(ErrorKind::RecvFrom(err))),
                 Ok(addr) => break (addr, readable),
             }

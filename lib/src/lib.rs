@@ -4,7 +4,7 @@ mod error;
 pub use self::error::Error;
 
 mod pinger;
-pub use self::pinger::{Outcome, Pinger};
+pub use self::pinger::{Outcome, Pinger, Response};
 
 mod buf;
 pub use self::buf::Buffer;
