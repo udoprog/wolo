@@ -1,0 +1,12 @@
+[Unit]
+Description=Simple network monitoring in Rust
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wolo
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
