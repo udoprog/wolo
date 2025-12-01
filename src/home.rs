@@ -1,7 +1,7 @@
 use core::pin::pin;
 use std::borrow::Cow;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -12,15 +12,15 @@ use crate::embed;
 use crate::embed::Base64;
 
 /// Construct a new home handle.
-pub fn new(home_path: Option<&Path>) -> Home {
+pub fn new(paths: Vec<PathBuf>) -> Home {
     Home {
-        home_path: home_path.map(Arc::from),
+        paths: Arc::from(paths),
     }
 }
 
 #[derive(Clone)]
 pub struct Home {
-    home_path: Option<Arc<Path>>,
+    paths: Arc<[PathBuf]>,
 }
 
 #[derive(Serialize)]
@@ -47,15 +47,18 @@ impl Home {
     /// Build a home page from the configured path or embedded asset.
     pub async fn build(&self) -> HomePage {
         let mut home = HomePage::new();
+        let mut count = 0;
 
-        if let Some(path) = self.home_path.as_deref()
-            && let Ok(file) = File::open(path).await
-        {
-            home.populate(file).await;
-            return home;
+        for path in self.paths.iter() {
+            if let Ok(file) = File::open(path).await {
+                count += 1;
+                home.populate(file).await;
+            }
         }
 
-        if let Some(asset) = embed::get("home.md") {
+        if count == 0
+            && let Some(asset) = embed::get("home.md")
+        {
             home.populate(Cursor::new(asset.data.as_ref())).await;
         }
 

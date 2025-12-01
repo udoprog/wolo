@@ -5,7 +5,7 @@ use core::{fmt, iter};
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use macaddr::MacAddr6;
@@ -50,6 +50,8 @@ impl TakeFlexible for HostConfig {
 pub struct Config {
     /// Address and port to bind the server to.
     pub bind: Option<String>,
+    /// Paths to load landing page configuration from.
+    pub home: Vec<PathBuf>,
     /// Loaded hosts.
     pub hosts: Vec<HostConfig>,
 }
@@ -108,6 +110,8 @@ impl Config {
         if let Some(bind) = parser.take("bind") {
             self.bind = Some(bind);
         }
+
+        self.home = parser.take_iter("home");
 
         for host in parser.take_flexible::<HostConfig, Vec<_>>("hosts") {
             self.add_host(host);

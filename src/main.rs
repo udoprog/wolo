@@ -152,9 +152,9 @@ struct Opts {
     /// Address and port to bind the server to. Defaults to `127.0.0.1:3000`.
     #[clap(long)]
     bind: Option<String>,
-    /// Path to load landing page configuration from.
-    #[clap(long)]
-    home: Option<PathBuf>,
+    /// Paths to load landing page configuration from.
+    #[clap(long, default_value = "/etc/wolo/home.md")]
+    home: Vec<PathBuf>,
     /// Path to load an ethers file from. By default this is `/etc/ethers`.
     ///
     /// The files specified in here will be monitored for changes and reloaded
@@ -258,8 +258,17 @@ async fn inner() -> Result<()> {
         hosts.add_hosts_path(path);
     }
 
-    let home = home::new(opts.home.as_deref());
+    let mut homes = Vec::new();
 
+    for path in &opts.home {
+        homes.push(path.clone());
+    }
+
+    for path in &config.home {
+        homes.push(path.clone());
+    }
+
+    let home = home::new(homes);
     let hosts = hosts.build();
     let hosts_handle = tokio::spawn(hosts::spawn(hosts.clone(), config.clone()));
 
