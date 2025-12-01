@@ -1,5 +1,3 @@
-%global crate wolo
-
 Name:           wolo
 Version:        0.0.1
 Release:        1%{?dist}
@@ -12,11 +10,11 @@ Source0:        https://github.com/udoprog/wolo/archive/refs/tags/%{version}.tar
 BuildRequires:  cargo
 BuildRequires:  rust
 
-%description -n %{crate}
+%description
 A simple networking utility in Rust.
 
 %prep
-%autosetup -n %{crate}-%{version}
+%autosetup
 
 %build
 cargo build --release
@@ -24,7 +22,7 @@ cargo build --release
 %install
 install -Dm755 target/release/wolo %{buildroot}%{_bindir}/wolo
 
-%files  -n %{crate}
+%files
 %license LICENSE-MIT
 %license LICENSE-APACHE
 %{_bindir}/wolo
