@@ -3,11 +3,10 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use core::pin::pin;
 use core::time::Duration;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Error};
-use async_fuse::Fuse;
 use lib::{Buffer, Outcome, Pinger, Response};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -208,27 +207,6 @@ impl PingerService {
 }
 
 pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> {
-    #[derive(Debug)]
-    enum What {
-        Ping,
-        Timeout,
-    }
-
-    #[derive(Debug)]
-    struct Task {
-        id: Uuid,
-        addr: IpAddr,
-        next: Instant,
-        what: What,
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    struct Deferred {
-        id: Uuid,
-        addr: IpAddr,
-        started: Instant,
-    }
-
     let mut service = PingerService {
         v4: Pinger::v4()?,
         v6: Pinger::v6()?,
@@ -240,7 +218,7 @@ pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> 
     // A host cache.
     let mut cache = HostNameCache::new();
     // Update host list every 10 seconds.
-    let mut cache_eviction = time::interval(Duration::from_secs(10));
+    let mut host_update = time::interval(Duration::from_secs(10));
     // Working set of host ids.
     let mut new = HashSet::new();
     // Hosts we've already seen.
@@ -250,32 +228,19 @@ pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> 
     // Map of host ids to their domain pinger tasks.
     let mut domains = BTreeMap::<Uuid, Arc<CacheNameResult>>::new();
     // Pending pings.
-    let mut deferred = HashMap::<u64, Deferred>::new();
+    let mut deferred = HashMap::<u64, Defer>::new();
 
-    // Wakeup for next ping.
-    let mut tasks = HashMap::<(Uuid, IpAddr), Task>::new();
-    let mut sleep = pin!(Fuse::empty());
-    let mut update = false;
+    let mut tasks = Tasks::default();
+    // Wakeup for next task.
+    let mut sleep = pin!(time::sleep_until(Instant::now()));
 
     loop {
-        if update {
-            if let Some((key, task)) = tasks.iter().min_by_key(|(_, task)| task.next) {
-                let key = *key;
-                let deadline = task.next;
-
-                sleep.set(Fuse::new(async move {
-                    _ = time::sleep_until(deadline).await;
-                    key
-                }));
-            } else {
-                sleep.set(Fuse::empty());
-            }
-
-            update = false;
+        if let Some(deadline) = tasks.next_deadline() {
+            sleep.as_mut().reset(deadline);
         }
 
         tokio::select! {
-            _ = cache_eviction.tick() => {
+            _ = host_update.tick() => {
                 cache.evict_old().await;
 
                 new.clear();
@@ -294,13 +259,11 @@ pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> 
 
                 if new != old {
                     for id in old.difference(&new) {
-                        tasks.retain(|_, t| t.id != *id);
+                        tasks.remove_by_id(*id);
                         domains.remove(id);
                         deferred.retain(|_, d| d.id != *id);
                         state.pinged.lock().await.remove(id);
                     }
-
-                    update = true;
 
                     old.clear();
                     old.extend(new.iter().copied());
@@ -318,9 +281,9 @@ pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> 
                     continue;
                 }
 
-                tracing::info!(?id, ?new, "domain updates");
+                tracing::info!(?id, ?new, "Domain updates");
 
-                tasks.retain(|_, t| t.id != id);
+                tasks.remove_by_id(id);
                 deferred.retain(|_, d| d.id != id);
 
                 let mut pinged = state.pinged.lock().await;
@@ -341,8 +304,7 @@ pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> 
 
                 for &addr in new.addresses.iter() {
                     tracing::trace!(?id, ?addr, "scheduling ping");
-                    tasks.insert((id, addr), Task { id, addr, next: now, what: What::Ping });
-                    update = true;
+                    tasks.insert(Key { id, addr, deadline: now }, What::Ping);
                 }
 
                 domains.insert(id, new.clone());
@@ -352,101 +314,196 @@ pub(super) async fn new(state: State, hosts: hosts::State) -> Result<(), Error> 
                     continue;
                 };
 
-                let Some(d) = deferred.remove(&id) else {
+                let Some(k) = deferred.remove(&id) else {
                     tracing::trace!(?id, "missing deferred ping response");
                     continue;
                 };
 
-                tracing::trace!(?id, ?d.id, ?d.addr, "received ping response");
+                tracing::trace!(?id, ?k.id, ?k.addr, "received ping response");
 
-                let Some(t) = tasks.get_mut(&(d.id, d.addr)) else {
-                    continue;
-                };
-
-                let mut pinged = state.pinged.lock().await;
-
-                let now = Instant::now();
-
-                let p = pinged.entry(d.id).or_default();
-
-                p.result(PingResult {
-                    kind,
-                    outcome: r.outcome,
-                    code: r.code,
-                    sequence: r.sequence,
-                    rtt: now.saturating_duration_since(d.started),
-                    sampled: now,
-                    target: d.addr,
-                    source: r.source,
-                    dest: r.dest,
-                    checksum: r.checksum,
-                    expected_checksum: r.expected_checksum,
-                });
-
-                t.next = now + NEXT;
-                t.what = What::Ping;
-                update = true;
-            }
-            key = sleep.as_mut() => {
-                let remove = 'done: {
-                    let Some(t) = tasks.get_mut(&key) else {
-                        break 'done false;
-                    };
-
+                tasks.with_mut(k.id, k.addr, async |t| {
                     let now = Instant::now();
 
+                    let mut pinged = state.pinged.lock().await;
+                    let p = pinged.entry(k.id).or_default();
+
+                    p.result(PingResult {
+                        kind,
+                        outcome: r.outcome,
+                        code: r.code,
+                        sequence: r.sequence,
+                        rtt: now.saturating_duration_since(k.started),
+                        sampled: now,
+                        target: k.addr,
+                        source: r.source,
+                        dest: r.dest,
+                        checksum: r.checksum,
+                        expected_checksum: r.expected_checksum,
+                    });
+
+                    t.key.deadline = (k.started + NEXT).max(now);
+                    t.what = What::Ping;
+                }).await;
+            }
+            _ = sleep.as_mut(), if !tasks.is_empty() => {
+                let now = Instant::now();
+
+                let remove = tasks.next_task(async |t| {
                     match t.what {
                         What::Ping => {
                             tracing::trace!(?t, "pinging");
 
-                            let ping_id = match service.ping(t.addr).await {
+                            let ping_id = match service.ping(t.key.addr).await {
                                 Ok(ping_id) => ping_id,
                                 Err(error) => {
-                                    state.pinged.lock().await.entry(t.id).or_default().error(PingError {
+                                    state.pinged.lock().await.entry(t.key.id).or_default().error(PingError {
                                         error: error.to_string(),
-                                        kind: PingErrorKind::Address(t.addr),
+                                        kind: PingErrorKind::Address(t.key.addr),
                                         sampled: now,
                                     });
 
-                                    t.next = now + NEXT;
+                                    t.key.deadline = now + NEXT;
                                     t.what = What::Ping;
-                                    break 'done false;
+                                    return None;
                                 }
                             };
 
                             let Some(ping_id) = ping_id else {
-                                break 'done true;
+                                return Some(t.key);
                             };
 
-                            deferred.insert(ping_id, Deferred { id: t.id, addr: t.addr, started: now });
+                            deferred.insert(ping_id, Defer { id: t.key.id, addr: t.key.addr, started: now });
 
-                            t.next = now + TIMEOUT;
+                            t.key.deadline = now + TIMEOUT;
                             t.what = What::Timeout;
-                            false
+                            None
                         }
                         What::Timeout => {
                             let mut p = state.pinged.lock().await;
-                            let p = p.entry(t.id).or_default();
+                            let p = p.entry(t.key.id).or_default();
 
                             p.error(PingError {
                                 error: String::from("timeout"),
-                                kind: PingErrorKind::Address(t.addr),
+                                kind: PingErrorKind::Address(t.key.addr),
                                 sampled: now,
                             });
 
-                            t.next = now + NEXT;
+                            t.key.deadline = now + NEXT;
                             t.what = What::Ping;
-                            false
+                            None
                         }
                     }
-                };
+                }).await;
 
-                if remove {
-                    tasks.remove(&key);
+                if let Some(key) = remove {
+                    tasks.remove(key);
                 }
-
-                update = true;
             }
         }
+    }
+}
+
+#[derive(Debug)]
+enum What {
+    Ping,
+    Timeout,
+}
+
+#[derive(Debug)]
+struct Task {
+    key: Key,
+    what: What,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Key {
+    deadline: Instant,
+    id: Uuid,
+    addr: IpAddr,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Defer {
+    id: Uuid,
+    addr: IpAddr,
+    started: Instant,
+}
+
+#[derive(Default)]
+struct Tasks {
+    modified: bool,
+    tasks: HashMap<(Uuid, IpAddr), Task>,
+    timeouts: BTreeSet<Key>,
+}
+
+impl Tasks {
+    fn is_empty(&self) -> bool {
+        self.timeouts.is_empty()
+    }
+
+    /// Get the next deadline.
+    fn next_deadline(&mut self) -> Option<Instant> {
+        if !self.modified {
+            return None;
+        }
+
+        self.modified = false;
+        Some(self.timeouts.first()?.deadline)
+    }
+
+    fn remove_by_id(&mut self, id: Uuid) {
+        self.modified = true;
+
+        self.tasks.retain(|_, t| {
+            if t.key.id != id {
+                return true;
+            };
+
+            self.timeouts.remove(&t.key);
+            false
+        });
+    }
+
+    fn insert(&mut self, key: Key, what: What) {
+        self.modified = true;
+        self.tasks.insert((key.id, key.addr), Task { key, what });
+        self.timeouts.insert(key);
+    }
+
+    fn remove(&mut self, key: Key) -> Option<Task> {
+        let t = self.tasks.remove(&(key.id, key.addr))?;
+        self.modified = true;
+        self.timeouts.remove(&t.key);
+        Some(t)
+    }
+
+    /// Get and modify the next task.
+    async fn next_task<O>(&mut self, f: impl AsyncFnOnce(&mut Task) -> O) -> O
+    where
+        O: Default,
+    {
+        let Some(key) = self.timeouts.pop_first() else {
+            return O::default();
+        };
+
+        let Some(t) = self.tasks.get_mut(&(key.id, key.addr)) else {
+            return O::default();
+        };
+
+        self.modified = true;
+        let out = f(t).await;
+        self.timeouts.insert(t.key);
+        out
+    }
+
+    async fn with_mut(&mut self, id: Uuid, addr: IpAddr, f: impl AsyncFnOnce(&mut Task)) {
+        let Some(t) = self.tasks.get_mut(&(id, addr)) else {
+            return;
+        };
+
+        self.modified = true;
+        self.timeouts.remove(&t.key);
+        f(t).await;
+        self.timeouts.insert(t.key);
     }
 }

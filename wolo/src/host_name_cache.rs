@@ -5,9 +5,9 @@ use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::RwLock;
-use tokio::task::{self, JoinHandle};
+use tokio::task::{self, JoinError, JoinHandle};
 use uuid::Uuid;
 
 use crate::hosts::Host;
@@ -108,11 +108,11 @@ pub struct HostNameCacheLookup {
 
 impl HostNameCacheLookup {
     /// Get the results of the lookup.
-    pub async fn get(self) -> Result<Arc<CacheNameResult>> {
+    pub async fn get(self) -> Result<Arc<CacheNameResult>, JoinError> {
         match self.kind {
             InnerKind::Found { results } => Ok(results),
             InnerKind::Handle { id, map, handle } => {
-                let (errors, addresses) = handle.await.context("host name lookup task panicked")?;
+                let (errors, addresses) = handle.await?;
 
                 let results = Arc::<CacheNameResult>::from(CacheNameResult { errors, addresses });
                 let mut map = map.write().await;

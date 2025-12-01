@@ -28,5 +28,4 @@ twox-hash = { version = "2.1.2", features = ["xxhash3_128"] }
 uuid = { version = "1.18.1", features = ["serde"] }
 rand = "0.9.2"
 toml = "0.9.8"
-pulldown-cmark = "0.13.0"
-async-fuse = "1.0.1"
+slab = "0.4.11"
