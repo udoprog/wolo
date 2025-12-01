@@ -1,10 +1,15 @@
 [package]
 name = "wolo"
+version = "0.0.3"
+authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2024"
 rust-version = "1.91"
 description = "A lightweight rust service to do basic network monitoring."
+documentation = "https://docs.rs/wolo"
+readme = "README.md"
+homepage = "https://github.com/udoprog/wolo"
+repository = "https://github.com/udoprog/wolo"
 license = "MIT OR Apache-2.0"
-publish = false
 
 [[bin]]
 bench = false

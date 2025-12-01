@@ -1,5 +1,5 @@
 Name:           wolo
-Version:        0.0.2
+Version:        0.0.3
 Release:        1%{?dist}
 Summary:        Simple network monitoring in Rust.
 
@@ -38,13 +38,3 @@ install -Dm644 rpm/wolo.service %{buildroot}%{_unitdir}/wolo.service
 %license LICENSE-APACHE
 %{_bindir}/wolo
 %{_unitdir}/wolo.service
-
-%changelog
-* Mon Dec 01 2025 John-John Tedro <udoprog@tedro.se> - 0.0.2-1
-- Release 0.0.2
-
-* Mon Dec 01 2025 John-John Tedro <udoprog@tedro.se> - 0.0.1-1
-- Release 0.0.1
-
-* Mon Dec 01 2025 John-John Tedro <udoprog@tedro.se> - 0.0.0-1
-- Initial release 0.0.0

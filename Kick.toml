@@ -1,2 +1,6 @@
 lib_badges = ["-crates.io", "+discord"]
 readme_badges = ["-crates.io", "+discord"]
+
+[[version]]
+paths = ["rpm/*.spec"]
+pattern = "Version:\\s*(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)"
