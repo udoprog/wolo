@@ -4,7 +4,7 @@
 //! run with:
 //!
 //! ```sh
-//! wolo --bind 0.0.0.0:3000 --home home.md
+//! wolo --bind 127.0.0.1:3000 --home home.md
 //! ```
 //!
 //! The `home.md` is used to populate the landing page, see [Landing
@@ -43,7 +43,7 @@
 //! ```toml
 //! # The default socket address to bind to.
 //! # Can be IPv4 or IPv6.
-//! bind = "0.0.0.0:3000"
+//! bind = "localhost:3000"
 //!
 //! # Simple variant of a list of hosts.
 //! hosts = ["example.com", "another.example.com"]
@@ -87,7 +87,9 @@
 
 #![allow(clippy::drain_collect)]
 
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::env;
+use std::net::ToSocketAddrs;
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -116,7 +118,7 @@ mod showcase;
 mod utils;
 mod wake_on_lan;
 
-const DEFAULT_BIND: &str = "0.0.0.0:3000";
+const DEFAULT_BIND: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3000));
 
 /// Path to load links from.
 #[derive(Clone)]
@@ -142,11 +144,12 @@ impl IntoResponse for StaticFile {
 }
 
 #[derive(Parser)]
+#[command(version, about, long_about = None)]
 struct Opts {
     /// Path to load configuration files from.
     #[clap(long, default_value = "/etc/wolo/config.toml")]
     config: Vec<PathBuf>,
-    /// Address and port to bind the server to. Defaults to `0.0.0.0:3000`.
+    /// Address and port to bind the server to. Defaults to `127.0.0.1:3000`.
     #[clap(long)]
     bind: Option<String>,
     /// Path to load landing page configuration from.
@@ -195,7 +198,13 @@ async fn main() -> ExitCode {
 async fn inner() -> Result<()> {
     let templates = crate::utils::load_templates().context("templates")?;
 
-    let opts = Opts::try_parse()?;
+    let opts = match Opts::try_parse() {
+        Ok(opts) => opts,
+        Err(error) => {
+            print!("{error}");
+            return Ok(());
+        }
+    };
 
     let mut config = config::Config::default();
 
@@ -221,6 +230,19 @@ async fn inner() -> Result<()> {
     if has_errors {
         return Err(anyhow!("Configuration had errors"));
     }
+
+    fn to_socket_addr(bind: &str) -> Result<SocketAddr> {
+        for address in bind.to_socket_addrs()? {
+            return Ok(address);
+        }
+
+        Err(anyhow!("no addresses found for {bind}"))
+    }
+
+    let bind = match opts.bind.as_deref().or(config.bind.as_deref()) {
+        Some(s) => to_socket_addr(s).context("parsing bind address")?,
+        None => DEFAULT_BIND,
+    };
 
     let config = Arc::new(config);
 
@@ -265,12 +287,6 @@ async fn inner() -> Result<()> {
         .with_state(state)
         .nest("/network", network)
         .fallback(get(static_handler));
-
-    let bind = opts
-        .bind
-        .as_deref()
-        .or(config.bind.as_deref())
-        .unwrap_or(DEFAULT_BIND);
 
     let listener = if let Some(listener) =
         try_listener_from_env("LISTEN_FDS").context("setting up listen fd")?

@@ -27,7 +27,7 @@ impl Serialize for Base64 {
 }
 
 #[derive(RustEmbed)]
-#[folder = "wolo/static/"]
+#[folder = "static/"]
 struct Assets;
 
 pub(super) fn hash() -> Base64 {

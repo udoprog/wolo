@@ -11,11 +11,6 @@ homepage = "https://github.com/udoprog/wolo"
 repository = "https://github.com/udoprog/wolo"
 license = "MIT OR Apache-2.0"
 
-[[bin]]
-bench = false
-path = "wolo/src/main.rs"
-name = "wolo"
-
 [dependencies]
 lib = { path = "lib" }
 
