@@ -55,7 +55,7 @@ impl Home {
             return home;
         }
 
-        if let Some(asset) = embed::Assets::get("home.md") {
+        if let Some(asset) = embed::get("home.md") {
             home.populate(Cursor::new(asset.data.as_ref())).await;
         }
 

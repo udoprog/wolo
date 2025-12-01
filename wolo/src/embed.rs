@@ -1,6 +1,8 @@
 use core::fmt;
 
-use rust_embed::RustEmbed;
+use std::borrow::Cow;
+
+use rust_embed::{EmbeddedFile, RustEmbed};
 use serde::Serialize;
 
 pub(crate) struct Base64([u8; 32]);
@@ -26,7 +28,7 @@ impl Serialize for Base64 {
 
 #[derive(RustEmbed)]
 #[folder = "wolo/static/"]
-pub(super) struct Assets;
+struct Assets;
 
 pub(super) fn hash() -> Base64 {
     const FILES: &[&str] = &["style.css", "network.js"];
@@ -44,4 +46,12 @@ pub(super) fn hash() -> Base64 {
     }
 
     Base64(base)
+}
+
+pub(super) fn get(path: &str) -> Option<EmbeddedFile> {
+    Assets::get(path)
+}
+
+pub(super) fn iter() -> impl Iterator<Item = Cow<'static, str>> {
+    Assets::iter()
 }

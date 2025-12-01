@@ -7,7 +7,7 @@ use minijinja::Environment;
 use relative_path::RelativePath;
 use serde::Serialize;
 
-use crate::embed::Assets;
+use crate::embed;
 
 /// Handler for templates.
 #[derive(Clone)]
@@ -30,10 +30,10 @@ pub(crate) fn load_templates() -> Result<Templates, Error> {
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
 
-    for name in Assets::iter() {
+    for name in embed::iter() {
         let path = RelativePath::new(name.as_ref());
 
-        let Some(content) = Assets::get(path.as_str()) else {
+        let Some(content) = embed::get(path.as_str()) else {
             continue;
         };
 
