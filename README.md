@@ -11,7 +11,7 @@ Populate `/etc/ethers` (`man ethers`) and/or `/etc/hosts` (`man hosts`) and
 run with:
 
 ```sh
-wolo --bind 0.0.0.0:3000 --home home.md
+wolo --bind 127.0.0.1:3000 --home home.md
 ```
 
 The `home.md` is used to populate the landing page, see [Landing
@@ -50,7 +50,7 @@ The configuration files are in toml, and have the following format:
 ```toml
 # The default socket address to bind to.
 # Can be IPv4 or IPv6.
-bind = "0.0.0.0:3000"
+bind = "localhost:3000"
 
 # Simple variant of a list of hosts.
 hosts = ["example.com", "another.example.com"]
