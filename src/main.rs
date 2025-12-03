@@ -105,6 +105,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::task;
 
+use crate::config::Config;
 use crate::utils::Templates;
 
 mod config;
@@ -112,6 +113,7 @@ mod embed;
 mod home;
 mod host_name_cache;
 mod hosts;
+mod mokuro;
 mod network;
 mod ping_loop;
 mod showcase;
@@ -155,6 +157,9 @@ struct Opts {
     /// Paths to load landing page configuration from.
     #[clap(long, default_value = "/etc/wolo/home.md")]
     home: Vec<PathBuf>,
+    /// Paths to load Mokuro files from.
+    #[clap(long)]
+    mokuro: Vec<PathBuf>,
     /// Path to load an ethers file from. By default this is `/etc/ethers`.
     ///
     /// The files specified in here will be monitored for changes and reloaded
@@ -206,7 +211,7 @@ async fn inner() -> Result<()> {
         }
     };
 
-    let mut config = config::Config::default();
+    let mut config = Config::default();
 
     let mut has_errors = false;
 
@@ -243,6 +248,10 @@ async fn inner() -> Result<()> {
         Some(s) => to_socket_addr(s).context("parsing bind address")?,
         None => DEFAULT_BIND,
     };
+
+    for path in &opts.mokuro {
+        config.push_mokuro_path(path);
+    }
 
     let config = Arc::new(config);
 
@@ -283,18 +292,21 @@ async fn inner() -> Result<()> {
     let network = network::router(
         ping_state,
         "/network",
-        templates,
+        templates.clone(),
         hosts.clone(),
         showcase,
         home,
     )
     .await?;
 
+    let mokuro = mokuro::router(templates, config);
+
     // build our application with a route
     let app = Router::new()
         .route("/", get(root))
         .with_state(state)
         .nest("/network", network)
+        .nest("/mokuro", mokuro)
         .fallback(get(static_handler));
 
     let listener = if let Some(listener) =
@@ -356,25 +368,45 @@ fn try_listener_from_env(env: &'static str) -> Result<Option<TcpListener>> {
 }
 
 // Make our own error that wraps `anyhow::Error`.
-struct Error(anyhow::Error);
+struct Error {
+    kind: ErrorKind,
+}
+
+impl Error {
+    fn not_found() -> Self {
+        Self {
+            kind: ErrorKind::NotFound,
+        }
+    }
+}
+
+enum ErrorKind {
+    NotFound,
+    Other(anyhow::Error),
+}
 
 impl<E> From<E> for Error
 where
     E: Into<anyhow::Error>,
 {
     fn from(err: E) -> Self {
-        Self(err.into())
+        Self {
+            kind: ErrorKind::Other(err.into()),
+        }
     }
 }
 
 // Tell axum how to convert `Error` into a response.
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {}", self.0),
-        )
-            .into_response()
+        match self.kind {
+            ErrorKind::NotFound => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+            ErrorKind::Other(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Something went wrong: {err}"),
+            )
+                .into_response(),
+        }
     }
 }
 

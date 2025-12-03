@@ -20,31 +20,6 @@ where
     fn take_value(hosts: Parser<'_>) -> Option<Self>;
 }
 
-impl TakeFlexible for HostConfig {
-    fn take_table(key: &str, mut parser: Parser<'_>) -> Option<Self> {
-        let out = HostConfig {
-            macs: parser.take_iter("macs"),
-            names: BTreeSet::from([key.to_owned()]),
-            preferred_name: parser.take("preferred_name"),
-            ignore: parser.take_boolean("ignore").unwrap_or(false),
-        };
-
-        parser.check();
-        Some(out)
-    }
-
-    fn take_value(hosts: Parser<'_>) -> Option<Self> {
-        let host = hosts.parse()?;
-
-        Some(HostConfig {
-            macs: BTreeSet::new(),
-            names: BTreeSet::from([host]),
-            preferred_name: None,
-            ignore: false,
-        })
-    }
-}
-
 /// Loaded configuration file.
 #[derive(Default)]
 pub struct Config {
@@ -54,6 +29,17 @@ pub struct Config {
     pub home: Vec<PathBuf>,
     /// Loaded hosts.
     pub hosts: Vec<HostConfig>,
+    /// Paths to load Mokuro files from.
+    pub mokuro: Vec<MokuroConfig>,
+}
+
+impl Config {
+    /// Push mokuro path.
+    pub fn push_mokuro_path(&mut self, path: &Path) {
+        self.mokuro.push(MokuroConfig {
+            path: path.to_owned(),
+        });
+    }
 }
 
 /// Loaded host configuration.
@@ -67,6 +53,55 @@ pub struct HostConfig {
     pub preferred_name: Option<String>,
     /// Whether to ignore this host.
     pub ignore: bool,
+}
+
+impl TakeFlexible for HostConfig {
+    fn take_table(key: &str, mut parser: Parser<'_>) -> Option<Self> {
+        let out = Self {
+            macs: parser.take_iter("macs"),
+            names: BTreeSet::from([key.to_owned()]),
+            preferred_name: parser.take("preferred_name"),
+            ignore: parser.take_boolean("ignore").unwrap_or(false),
+        };
+
+        parser.check();
+        Some(out)
+    }
+
+    fn take_value(parser: Parser<'_>) -> Option<Self> {
+        let names = BTreeSet::from([parser.parse()?]);
+
+        Some(Self {
+            macs: BTreeSet::new(),
+            names,
+            preferred_name: None,
+            ignore: false,
+        })
+    }
+}
+
+/// Loaded mokuro configuration.
+#[derive(Debug)]
+pub struct MokuroConfig {
+    /// Mokuro path.
+    pub path: PathBuf,
+}
+
+impl TakeFlexible for MokuroConfig {
+    fn take_table(key: &str, parser: Parser<'_>) -> Option<Self> {
+        let out = Self {
+            path: PathBuf::from(key),
+        };
+
+        parser.check();
+        Some(out)
+    }
+
+    fn take_value(parser: Parser<'_>) -> Option<Self> {
+        Some(Self {
+            path: parser.parse()?,
+        })
+    }
 }
 
 impl Config {
@@ -115,6 +150,10 @@ impl Config {
 
         for host in parser.take_flexible::<HostConfig, Vec<_>>("hosts") {
             self.add_host(host);
+        }
+
+        for mokuro in parser.take_flexible::<MokuroConfig, Vec<_>>("mokuro") {
+            self.mokuro.push(mokuro);
         }
 
         parser.check();

@@ -1,0 +1,13 @@
+{% extends "layout.html" %}
+
+{% block title %}{{title}}{% endblock %}
+
+{% block content %}
+<h1>{{title}}</h1>
+
+<ul>
+{% for link in links %}
+<li><a href="{{link.href}}">{{link.title}}</a></li>
+{% endfor %}
+</ul>
+{% endblock %}
