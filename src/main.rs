@@ -241,7 +241,7 @@ async fn inner() -> Result<()> {
     }
 
     fn to_socket_addr(bind: &str) -> Result<SocketAddr> {
-        for address in bind.to_socket_addrs()? {
+        if let Some(address) = bind.to_socket_addrs()?.next() {
             return Ok(address);
         }
 
