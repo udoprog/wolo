@@ -88,29 +88,44 @@ impl HomePage {
 
     /// Populate the home page from an asynchronous reader.
     async fn populate(&mut self, reader: impl AsyncRead) {
-        let reader = pin!(BufReader::new(reader));
-        let mut lines = reader.lines();
+        let mut reader = pin!(BufReader::new(reader));
+        let mut line = String::new();
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(title) = line.trim_start().strip_prefix('#') {
-                self.title = Cow::Owned(title.trim().to_owned());
-                continue;
-            }
+        loop {
+            line.clear();
 
-            if let Some(line) = line.trim_start().strip_prefix('*') {
-                let Some(link) = parse_link(line.trim()) else {
-                    continue;
-                };
+            let Ok(n) = reader.read_line(&mut line).await else {
+                break;
+            };
 
-                self.links.push(link);
-                continue;
+            if n == 0 {
+                break;
             }
 
             let line = line.trim();
+            let mut chars = line.chars();
 
-            if !line.is_empty() {
-                self.text.push_str(line);
-                self.text.push('\n');
+            let Some(head) = chars.next() else {
+                continue;
+            };
+
+            match head {
+                '#' => {
+                    self.title = Cow::Owned(chars.as_str().trim().to_owned());
+                    continue;
+                }
+                '*' => {
+                    let Some(link) = parse_link(chars.as_str().trim()) else {
+                        continue;
+                    };
+
+                    self.links.push(link);
+                    continue;
+                }
+                _ => {
+                    self.text.push_str(line);
+                    self.text.push('\n');
+                }
             }
         }
     }
